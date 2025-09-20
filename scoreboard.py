@@ -1,6 +1,3 @@
-
-# --- Schedule View ---
-
 TEAM_NAME_FONT_SIZE = '6vw'
 TEAM_NAME_MIN_FONT_SIZE = '40px'
 SCORE_FONT_SIZE = '6vw'
@@ -18,54 +15,160 @@ import json
 app = Flask(__name__)
 
 # --- API Shortcuts for Stream Deck/Remote Control ---
+# ...existing code...
+
+# Load teams from CSV for initial values
+import csv
+def get_first_two_teams():
+  with open('teams.csv', newline='') as csvfile:
+    reader = csv.DictReader(csvfile)
+    teams = list(reader)
+    return teams[0], teams[1]
+t1, t2 = get_first_two_teams()
+scoreboard = {
+  "team1": {"name": t1['name'], "score": 0, "color": t1['home_bg'], "manup": False, "manup_expiry": None},
+  "team2": {"name": t2['name'], "score": 0, "color": t2['away_bg'], "manup": False, "manup_expiry": None},
+  "period": "1st",
+  "hide_scores": False
+}
+
 from flask import redirect, url_for
+
+
+# Live-updating home players page
+@app.route('/players/home')
+def players_home_live():
+  import csv, os, math
+  team_name = scoreboard['team1']['name']
+  page = int(request.args.get('page', 1))
+  csv_path = os.path.join('players', f'{team_name}.csv')
+  players = []
+  try:
+    with open(csv_path, newline='') as csvfile:
+      reader = csv.DictReader(csvfile)
+      for row in reader:
+        players.append(row)
+  except FileNotFoundError:
+    players = []
+  per_page = 20
+  total_pages = math.ceil(len(players) / per_page)
+  start = (page - 1) * per_page
+  end = start + per_page
+  page_players = players[start:end]
+  print('DEBUG: Loaded players:', players)
+  print('DEBUG: Page players:', page_players)
+  # Map CSV headers to expected keys for template
+  for p in page_players:
+    # Try all possible header variants
+    p['first_name'] = p.get('first_name') or p.get('First Name') or p.get('first') or ''
+    p['last_name'] = p.get('last_name') or p.get('Last Name') or p.get('last') or ''
+    p['capnumber'] = p.get('capnumber') or p.get('Cap Number') or ''
+  # Get team color and logo
+  color = scoreboard['team1']['color'] if team_name == scoreboard['team1']['name'] else None
+  if not color:
+    try:
+      color = load_teams()[team_name]['home_bg']
+    except Exception:
+      color = '#222'
+  logo = f"{team_name.replace(' ', '').lower()}.svg"
+  return render_template(
+    'players.html',
+    team_name=team_name,
+    players=page_players,
+    page=page,
+    total_pages=total_pages,
+    team_color=color,
+    team_logo=logo
+  )
+
+# Live-updating away players page
+@app.route('/players/away')
+def players_away_live():
+  import csv, os, math
+  team_name = scoreboard['team2']['name']
+  page = int(request.args.get('page', 1))
+  csv_path = os.path.join('players', f'{team_name}.csv')
+  players = []
+  try:
+    with open(csv_path, newline='') as csvfile:
+      reader = csv.DictReader(csvfile)
+      for row in reader:
+        players.append(row)
+  except FileNotFoundError:
+    players = []
+  per_page = 20
+  total_pages = math.ceil(len(players) / per_page)
+  start = (page - 1) * per_page
+  end = start + per_page
+  page_players = players[start:end]
+  # Map CSV headers to expected keys for template
+  for p in page_players:
+    p['first_name'] = p.get('first_name') or p.get('First Name') or p.get('first') or ''
+    p['last_name'] = p.get('last_name') or p.get('Last Name') or p.get('last') or ''
+    p['capnumber'] = p.get('capnumber') or p.get('Cap Number') or ''
+  color = scoreboard['team2']['color'] if team_name == scoreboard['team2']['name'] else None
+  if not color:
+    try:
+      color = load_teams()[team_name]['away_bg']
+    except Exception:
+      color = '#222'
+  logo = f"{team_name.replace(' ', '').lower()}.svg"
+  return render_template(
+    'players.html',
+    team_name=team_name,
+    players=page_players,
+    page=page,
+    total_pages=total_pages,
+    team_color=color,
+    team_logo=logo
+  )
 
 # Add a point to home
 @app.route('/api/add_home')
 def api_add_home():
   scoreboard['team1']['score'] += 1
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Add a point to away
 @app.route('/api/add_away')
 def api_add_away():
   scoreboard['team2']['score'] += 1
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Remove a point from home
 @app.route('/api/remove_home')
 def api_remove_home():
   scoreboard['team1']['score'] = max(0, scoreboard['team1']['score'] - 1)
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Remove a point from away
 @app.route('/api/remove_away')
 def api_remove_away():
   scoreboard['team2']['score'] = max(0, scoreboard['team2']['score'] - 1)
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Advance the period
 @app.route('/api/next_period')
 def api_next_period():
-  periods = ['1st', '2nd', '3rd', '4th', '5th', 'shootoff']
+  periods = ['1st', '2nd', '3rd', '4th', '5th', 'Shoot-Off']
   idx = periods.index(scoreboard['period']) if scoreboard['period'] in periods else 0
   scoreboard['period'] = periods[(idx + 1) % len(periods)]
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Go back a period
 @app.route('/api/prev_period')
 def api_prev_period():
-  periods = ['1st', '2nd', '3rd', '4th', '5th', 'shootoff']
+  periods = ['1st', '2nd', '3rd', '4th', '5th', 'Shoot-Off']
   idx = periods.index(scoreboard['period']) if scoreboard['period'] in periods else 0
   scoreboard['period'] = periods[(idx - 1) % len(periods)]
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Go to the next game in the schedule
 @app.route('/api/next_game')
 def api_next_game():
   schedule = load_schedule()
   if not schedule:
-    return jsonify(scoreboard)
+    return ('', 204)
   # Find current game index
   current = None
   for i, row in enumerate(schedule):
@@ -74,21 +177,22 @@ def api_next_game():
       break
   next_idx = (current + 1) % len(schedule) if current is not None else 0
   next_game = schedule[next_idx]
+  teams = load_teams()
   scoreboard['team1']['name'] = next_game['home']
   scoreboard['team2']['name'] = next_game['away']
   scoreboard['team1']['score'] = 0
   scoreboard['team2']['score'] = 0
-  scoreboard['team1']['color'] = load_teams()[next_game['home']]['home_bg']
-  scoreboard['team2']['color'] = load_teams()[next_game['away']]['away_bg']
+  scoreboard['team1']['color'] = teams[next_game['home']]['home_bg']
+  scoreboard['team2']['color'] = teams[next_game['away']]['away_bg']
   scoreboard['period'] = next_game.get('period', '1st')
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Go to the previous game in the schedule
 @app.route('/api/prev_game')
 def api_prev_game():
   schedule = load_schedule()
   if not schedule:
-    return jsonify(scoreboard)
+    return ('', 204)
   # Find current game index
   current = None
   for i, row in enumerate(schedule):
@@ -97,14 +201,15 @@ def api_prev_game():
       break
   prev_idx = (current - 1) % len(schedule) if current is not None else 0
   prev_game = schedule[prev_idx]
+  teams = load_teams()
   scoreboard['team1']['name'] = prev_game['home']
   scoreboard['team2']['name'] = prev_game['away']
   scoreboard['team1']['score'] = 0
   scoreboard['team2']['score'] = 0
-  scoreboard['team1']['color'] = load_teams()[prev_game['home']]['home_bg']
-  scoreboard['team2']['color'] = load_teams()[prev_game['away']]['away_bg']
+  scoreboard['team1']['color'] = teams[prev_game['home']]['home_bg']
+  scoreboard['team2']['color'] = teams[prev_game['away']]['away_bg']
   scoreboard['period'] = prev_game.get('period', '1st')
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Toggle home man up
 @app.route('/api/toggle_home_manup')
@@ -112,7 +217,7 @@ def api_toggle_home_manup():
   import time
   scoreboard['team1']['manup'] = not scoreboard['team1']['manup']
   scoreboard['team1']['manup_expiry'] = time.time() + 30 if scoreboard['team1']['manup'] else None
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Toggle away man up
 @app.route('/api/toggle_away_manup')
@@ -120,7 +225,7 @@ def api_toggle_away_manup():
   import time
   scoreboard['team2']['manup'] = not scoreboard['team2']['manup']
   scoreboard['team2']['manup_expiry'] = time.time() + 30 if scoreboard['team2']['manup'] else None
-  return jsonify(scoreboard)
+  return ('', 204)
 
 # Reset scores and period
 @app.route('/api/reset')
@@ -128,7 +233,26 @@ def api_reset():
   scoreboard['team1']['score'] = 0
   scoreboard['team2']['score'] = 0
   scoreboard['period'] = '1st'
-  return jsonify(scoreboard)
+  return ('', 204)
+
+@app.route('/api/toggle_hide_scores')
+def api_toggle_hide_scores():
+  value = request.args.get('value')
+  if value is not None:
+    scoreboard['hide_scores'] = value.lower() == 'true'
+  else:
+    scoreboard['hide_scores'] = not scoreboard['hide_scores']
+  return ('', 204)
+
+@app.route('/api/refresh_data')
+def api_refresh_data():
+  global _teams_cache, _schedule_cache
+  _teams_cache = None
+  _schedule_cache = None
+  # Force reload by calling the functions
+  load_teams()
+  load_schedule()
+  return ('', 204)
 
 # API to get current font sizes
 @app.route('/font_sizes')
@@ -153,22 +277,51 @@ def serve_logo(filename):
 
 
 
-# Load teams from CSV for initial values
-import csv
-def get_first_two_teams():
-  with open('teams.csv', newline='') as csvfile:
-    reader = csv.DictReader(csvfile)
-    teams = list(reader)
-    return teams[0], teams[1]
-t1, t2 = get_first_two_teams()
-scoreboard = {
-  "team1": {"name": t1['name'], "score": 0, "color": t1['home_bg'], "manup": False, "manup_expiry": None},
-  "team2": {"name": t2['name'], "score": 0, "color": t2['away_bg'], "manup": False, "manup_expiry": None},
-  "period": "1st"
-}
-
 # --- Overlay Page ---
 from flask import render_template
+
+# --- Players View ---
+import math
+@app.route('/players/<team_name>')
+def players_view(team_name):
+  import csv
+  import os
+  page = int(request.args.get('page', 1))
+  csv_path = os.path.join('players', f'{team_name}.csv')
+  players = []
+  try:
+    with open(csv_path, newline='') as csvfile:
+      reader = csv.DictReader(csvfile)
+      for row in reader:
+        players.append(row)
+  except FileNotFoundError:
+    players = []
+  per_page = 20
+  total_pages = math.ceil(len(players) / per_page)
+  start = (page - 1) * per_page
+  end = start + per_page
+  page_players = players[start:end]
+  # Ensure keys for template
+  # Map CSV headers to expected keys for template
+  for p in page_players:
+    p['first_name'] = p.get('first_name') or p.get('First Name') or p.get('first') or ''
+    p['last_name'] = p.get('last_name') or p.get('Last Name') or p.get('last') or ''
+    p['capnumber'] = p.get('capnumber') or p.get('Cap Number') or ''
+  # Try to get color from teams.csv, fallback to #222
+  try:
+    color = load_teams()[team_name]['home_bg']
+  except Exception:
+    color = '#222'
+  logo = f"{team_name.replace(' ', '').lower()}.svg"
+  return render_template(
+    'players.html',
+    team_name=team_name,
+    players=page_players,
+    page=page,
+    total_pages=total_pages,
+    team_color=color,
+    team_logo=logo
+  )
 
 @app.route("/overlay")
 def overlay():
@@ -192,24 +345,33 @@ def overlay():
 
 # --- Config Page ---
 import csv
-def load_teams():
-    teams = {}
-    with open('teams.csv', newline='') as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            teams[row['name']] = row
-    return teams
 
-def load_schedule():
-    schedule = []
-    try:
-        with open('schedule.csv', newline='') as csvfile:
+# Cache teams and schedule data to avoid repeated file reads
+_teams_cache = None
+_schedule_cache = None
+
+def load_teams():
+    global _teams_cache
+    if _teams_cache is None:
+        _teams_cache = {}
+        with open('teams.csv', newline='') as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
-                schedule.append(row)
-    except FileNotFoundError:
-        pass
-    return schedule
+                _teams_cache[row['name']] = row
+    return _teams_cache
+
+def load_schedule():
+    global _schedule_cache
+    if _schedule_cache is None:
+        _schedule_cache = []
+        try:
+            with open('schedule.csv', newline='') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    _schedule_cache.append(row)
+        except FileNotFoundError:
+            pass
+    return _schedule_cache
 
 @app.route("/config")
 def config():
@@ -280,6 +442,15 @@ def config():
         body: JSON.stringify({{ team: which, manup: checked }})
       }});
     }}
+    async function updateHideScores() {{
+      const checked = document.getElementById('hidescores').checked;
+      await fetch('/api/toggle_hide_scores?value=' + checked);
+    }}
+    async function refreshData() {{
+      await fetch('/api/refresh_data');
+      // Reload the page to get fresh data
+      window.location.reload();
+    }}
     async function applyPreset() {{
       const idx = document.getElementById('preset').value;
       if (idx === "") return;
@@ -312,8 +483,10 @@ def config():
         .then(data => {{
           const t1 = document.getElementById('team1manup');
           const t2 = document.getElementById('team2manup');
+          const hide = document.getElementById('hidescores');
           if (t1) t1.checked = !!data.team1.manup;
           if (t2) t2.checked = !!data.team2.manup;
+          if (hide) hide.checked = !!data.hide_scores;
         }})
         .catch(e => {{}});
       setTimeout(pollState, 1000);
@@ -329,6 +502,12 @@ def config():
   </label>
   <label>Team 2 Man-Up:
     <input type="checkbox" id="team2manup" onchange="updateManup('team2')">
+  </label>
+  <label>Hide Scores:
+    <input type="checkbox" id="hidescores" onchange="updateHideScores()">
+  </label>
+  <label>
+    <button onclick="refreshData()" style="margin-top: 16px; padding: 8px 16px; font-size: 14px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">Refresh Teams & Schedule Data</button>
   </label>
   <label>Team Name Text Size:
     <input id="teamFontSize" type="text" value="2.8vw" onchange="updateFontSize('team')">
@@ -363,7 +542,7 @@ def config():
       <option value="3rd" {'selected' if scoreboard['period']=='3rd' else ''}>3rd</option>
       <option value="4th" {'selected' if scoreboard['period']=='4th' else ''}>4th</option>
       <option value="5th" {'selected' if scoreboard['period']=='5th' else ''}>5th</option>
-      <option value="shootoff" {'selected' if scoreboard['period']=='shootoff' else ''}>shootoff</option>
+      <option value="Shoot-off" {'selected' if scoreboard['period']=='Shoot-off' else ''}>Shoot-off</option>
     </select>
   </label>
 </body>

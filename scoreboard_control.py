@@ -19,8 +19,12 @@ def main():
         'next_period': '/api/next_period',
         'prev_period': '/api/prev_period',
         'next_game': '/api/next_game',
+        'prev_game': '/api/prev_game',
+        'reset': '/api/reset',
         'toggle_home_manup': '/api/toggle_home_manup',
         'toggle_away_manup': '/api/toggle_away_manup',
+        'toggle_hide_scores': '/api/toggle_hide_scores',
+        'refresh_data': '/api/refresh_data',
     }
     if action not in endpoints:
         print(f"Unknown action: {action}")

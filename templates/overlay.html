@@ -23,6 +23,7 @@
       backdrop-filter: blur(8px);
       padding: 32px 0;
       gap: 48px;
+      position: relative;
     }
     .section-home, .section-away {
       display: flex;
@@ -203,16 +204,33 @@
       // Home
       document.getElementById("home-logo").src = logoUrl(data.team1.name);
       document.getElementById("home-name").querySelector('span').innerText = data.team1.name;
-      document.getElementById("home-score").innerText = data.team1.score;
+      const homeScore = document.getElementById("home-score");
+      if (data.hide_scores) {
+        homeScore.style.display = 'none';
+      } else {
+        homeScore.style.display = 'flex';
+        homeScore.innerText = data.team1.score;
+      }
       document.getElementById("section-home").style.background = data.team1.color;
       // Away
       document.getElementById("away-logo").src = logoUrl(data.team2.name);
       document.getElementById("away-name").querySelector('span').innerText = data.team2.name;
-      document.getElementById("away-score").innerText = data.team2.score;
+      const awayScore = document.getElementById("away-score");
+      if (data.hide_scores) {
+        awayScore.style.display = 'none';
+      } else {
+        awayScore.style.display = 'flex';
+        awayScore.innerText = data.team2.score;
+      }
       document.getElementById("section-away").style.background = data.team2.color;
       // Period
       document.getElementById("period-label").innerText = "Period:";
       document.getElementById("period-value").innerText = data.period;
+      // Hide scores message
+      const hideMessage = document.getElementById("hide-message");
+      if (hideMessage) {
+        hideMessage.style.display = data.hide_scores ? "block" : "none";
+      }
       // Man up
       document.getElementById("home-manup").style.display = data.team1.manup ? "block" : "none";
       document.getElementById("away-manup").style.display = data.team2.manup ? "block" : "none";
@@ -245,6 +263,10 @@
         <span id="away-manup" class="manup-text" style="display:none;">MAN UP</span>
       </div>
       <img id="away-logo" class="team-logo right" src="/logos/{{ team2_logo }}" alt="Away Logo">
+    </div>
+    <!-- Hide scores message inside the scoreboard -->
+    <div style="position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); text-align: center;">
+      <span id="hide-message" style="font-size: 0.8vw; color: #000; display:{% if hide_scores %}block{% else %}none{% endif %};">Sorry we have no one to operate the stream</span>
     </div>
   </div>
 </body>

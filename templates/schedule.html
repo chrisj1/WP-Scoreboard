@@ -128,9 +128,16 @@ body { background: transparent; color: #fff; font-family: Arial, sans-serif; mar
       for (const game of games) {
         const home = teams[game.home];
         const away = teams[game.away];
-        const time = game.start_time.split(' ')[1];
+        const time24 = game.start_time.split(' ')[1];
+        // Convert 24-hour time to 12-hour US notation with AM/PM
+        let [h, m] = time24.split(':');
+        h = parseInt(h, 10);
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        let h12 = h % 12;
+        if (h12 === 0) h12 = 12;
+        const timeUS = `${h12}:${m} ${ampm}`;
         html += `<div class='sched-row'>
-          <div class='sched-time'>${time}</div>
+          <div class='sched-time'>${timeUS}</div>
           <div class='sched-team' style='background:${home.home_bg};color:${home.home_text};'>
             <img class='sched-logo' src='${logoUrl(game.home)}' alt='${game.home} logo'>
             <span>${game.home}</span>
@@ -150,7 +157,7 @@ body { background: transparent; color: #fff; font-family: Arial, sans-serif; mar
     }
     window.onload = function() {
       renderDay(dayIdx);
-      setInterval(nextDay, 10000);
+      setInterval(nextDay, 15000);
     };
   </script>
 </head>
