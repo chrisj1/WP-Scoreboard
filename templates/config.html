@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Scoreboard Config</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #222; color: white; padding: 20px; }
+    label { display: block; margin-top: 16px; }
+    select, input[type=text] { margin-left: 10px; font-size: 16px; }
+  </style>
+  <script>
+    const teamData = {{ teams|safe }};
+    const scheduleData = {{ schedule|safe }};
+    async function updateTeam(which) {
+      const team = document.getElementById(which).value;
+      let color = (which === 'team1') ? teamData[team]['home_bg'] : teamData[team]['away_bg'];
+      document.getElementById(which + 'color').value = color;
+      await fetch('/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ team: which, name: team, color: color })
+      });
+    }
+    async function updateColor(which) {
+      const team = document.getElementById(which).value;
+      const color = document.getElementById(which + 'color').value;
+      await fetch('/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ team: which, name: team, color: color })
+      });
+    }
+    async function updatePeriod() {
+      const period = document.getElementById('period').value;
+      await fetch('/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period: period })
+      });
+    }
+    async function updateScore(which) {
+      const val = parseInt(document.getElementById(which + 'score').value);
+      await fetch('/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ team: which, score: val })
+      });
+    }
+    async function updateManup(which) {
+      const checked = document.getElementById(which + 'manup').checked;
+      await fetch('/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ team: which, manup: checked })
+      });
+    }
+    async function applyPreset() {
+      const idx = document.getElementById('preset').value;
+      if (idx === "") return;
+      const preset = scheduleData[parseInt(idx)];
+      if (preset) {
+        document.getElementById('team1').value = preset.home;
+        document.getElementById('team2').value = preset.away;
+        document.getElementById('period').value = preset.period || '1st';
+        updateTeam('team1');
+        updateTeam('team2');
+        updatePeriod();
+        document.getElementById('team1').dispatchEvent(new Event('change'));
+        document.getElementById('team2').dispatchEvent(new Event('change'));
+      }
+    }
+    async function updateFontSize(type) {
+      const val = document.getElementById(type + 'FontSize').value;
+      await fetch('/set_font_size', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: type, value: val })
+      });
+    }
+    function pollState() {
+      fetch('/state')
+        .then(res => res.json())
+        .then(data => {
+          const t1 = document.getElementById('team1manup');
+          const t2 = document.getElementById('team2manup');
+          if (t1) t1.checked = !!data.team1.manup;
+          if (t2) t2.checked = !!data.team2.manup;
+        })
+        .catch(e => {});
+      setTimeout(pollState, 1000);
+    }
+    window.onload = function() {
+      pollState();
+    };
+  </script>
+</head>
+<body>
+  <label>Team 1 Man-Up:
+    <input type="checkbox" id="team1manup" onchange="updateManup('team1')">
+  </label>
+  <label>Team 2 Man-Up:
+    <input type="checkbox" id="team2manup" onchange="updateManup('team2')">
+  </label>
+  <label>Team Name Text Size:
+    <input id="teamFontSize" type="text" value="{{ font_team }}" onchange="updateFontSize('team')">
+  </label>
+  <label>Score Text Size:
+    <input id="scoreFontSize" type="text" value="{{ font_score }}" onchange="updateFontSize('score')">
+  </label>
+  <label>Preset Match:
+    <select id="preset" onchange="applyPreset()">
+      <option value="">-- Select a match --</option>
+      {{ schedule_options|safe }}
+    </select>
+  </label>
+  <label>Team 1:
+    <select id="team1" onchange="updateTeam('team1')">
+      {{ team1_options|safe }}
+    </select>
+    <input id="team1color" type="color" value="{{ team1_color }}" onchange="updateColor('team1')">
+  </label>
+  <label>Team 1 Score: <input id="team1score" type="number" min="0" value="{{ team1_score }}" onchange="updateScore('team1')"></label>
+  <label>Team 2:
+    <select id="team2" onchange="updateTeam('team2')">
+      {{ team2_options|safe }}
+    </select>
+    <input id="team2color" type="color" value="{{ team2_color }}" onchange="updateColor('team2')">
+  </label>
+  <label>Team 2 Score: <input id="team2score" type="number" min="0" value="{{ team2_score }}" onchange="updateScore('team2')"></label>
+  <label>Period: 
+    <select id="period" onchange="updatePeriod()">
+      <option value="1st" {% if period=='1st' %}selected{% endif %}>1st</option>
+      <option value="2nd" {% if period=='2nd' %}selected{% endif %}>2nd</option>
+      <option value="3rd" {% if period=='3rd' %}selected{% endif %}>3rd</option>
+      <option value="4th" {% if period=='4th' %}selected{% endif %}>4th</option>
+      <option value="5th" {% if period=='5th' %}selected{% endif %}>5th</option>
+      <option value="shootoff" {% if period=='shootoff' %}selected{% endif %}>shootoff</option>
+    </select>
+  </label>
+</body>
+</html>
