@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Overlay</title>
+  <style>
+    body {
+      background: transparent;
+      color: #fff;
+      font-family: 'Segoe UI', 'Arial', sans-serif;
+      margin: 0;
+    }
+    .scoreboard {
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
+      justify-content: center;
+      width: 2200px;
+      height: 140px;
+      margin: 32px auto;
+      background: rgba(30, 30, 40, 0.65);
+      border-radius: 40px;
+      box-shadow: 0 8px 32px 0 rgba(0,0,0,0.25), 0 1.5px 8px 0 rgba(0,0,0,0.10);
+      backdrop-filter: blur(8px);
+      padding: 32px 0;
+      gap: 48px;
+      position: relative;
+    }
+    .section-home, .section-away {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: center;
+      width: 900px;
+      min-width: 400px;
+      max-width: 900px;
+      border-radius: 32px;
+      height: 120px;
+      box-sizing: border-box;
+      padding: 0 0;
+      position: relative;
+      transition: background 0.2s;
+      background-clip: padding-box;
+      box-shadow: 0 2px 12px #0002;
+    }
+    .section-home {
+      color: #fff;
+    }
+    .section-away {
+      color: #fff;
+    }
+    .section-period {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 160px;
+      min-width: 120px;
+      max-width: 180px;
+      height: 120px;
+      background: rgba(255,255,255,0.85);
+      color: #111;
+      border-radius: 32px;
+      margin: 0 16px;
+      font-size: 1.3vw;
+      font-weight: bold;
+      box-shadow: 0 2px 12px #0002;
+      backdrop-filter: blur(4px);
+      letter-spacing: 1.5px;
+      text-shadow: 0 1px 8px #fff8;
+    }
+    .team-logo {
+      width: 70px;
+      height: 70px;
+      max-width: 100px;
+      max-height: 100px;
+      min-width: 48px;
+      min-height: 48px;
+      margin: 12px;
+      object-fit: contain;
+      border-radius: 16px;
+      border: 2.5px solid #fff;
+      box-shadow: 0 2px 8px #0003;
+      background: #fff2;
+    }
+    .team-logo.right {
+      margin: 12px;
+    }
+    .team-info {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1 1 0;
+      min-width: 0;
+      padding: 0 12px;
+    }
+    .team-name {
+      width: 100%;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 4px;
+    }
+    .team-name h2 {
+      margin: 0;
+      font-weight: 900;
+      text-align: center;
+      letter-spacing: 2.5px;
+      width: 100%;
+      min-width: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 0 8px;
+      font-size: min(max(1vw, 12px), 2.5vw);
+      line-height: 1.1;
+      white-space: nowrap;
+      overflow: hidden;
+      font-family: 'Segoe UI', 'Arial Black', Arial, sans-serif;
+      text-shadow: 0 2px 8px #000a, 0 1px 0 #fff8;
+      transition: font-size 0.2s;
+    }
+    .team-name h2 span {
+      display: inline-block;
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: bottom;
+    }
+    .manup-text {
+      display: block;
+      color: #FFD700;
+      font-size: 1.2vw;
+      font-weight: bold;
+      text-shadow: 1px 1px 8px #000, 0 1px 0 #fff8;
+      margin-top: 2px;
+      margin-bottom: 0;
+      line-height: 1.1;
+      letter-spacing: 1.5px;
+    }
+    .score {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 70px;
+      height: 90px;
+      font-size: 3.5vw;
+      font-weight: 900;
+      color: #fff;
+      background: #0007;
+      border-radius: 20px;
+      padding: 0 28px;
+      margin: 0 12px;
+      box-shadow: 0 2px 12px #0004;
+      font-family: 'Segoe UI', 'Arial Black', Arial, sans-serif;
+      text-shadow: 0 2px 8px #000a, 0 1px 0 #fff8;
+      letter-spacing: 2px;
+    }
+    .score.right {
+      color: #fff;
+      background: #0007;
+    }
+    .score.left {
+      color: #fff;
+      background: #0007;
+    }
+    @media (max-width: 1000px) {
+      .scoreboard { width: 98vw; min-width: 0; }
+      .section-home, .section-away { width: 40vw; min-width: 0; max-width: none; }
+      .section-period { width: 18vw; min-width: 0; max-width: none; }
+      .score { font-size: 6vw; }
+    }
+    
+    /* Shot Clock Styles */
+    .shot-clock {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 300px;
+      height: 120px;
+      position: fixed;
+      top: 50px;
+      right: 50px;
+      background: rgba(0, 0, 0, 0.8);
+      border-radius: 20px;
+      box-shadow: 0 4px 20px 0 rgba(0,0,0,0.3);
+      backdrop-filter: blur(8px);
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      z-index: 1000;
+    }
+    
+    .shot-clock-label {
+      font-size: 1.2vw;
+      font-weight: 600;
+      color: #fff;
+      text-shadow: 0 1px 4px #000;
+      margin-bottom: 8px;
+      letter-spacing: 1px;
+    }
+    
+    .shot-clock-time {
+      font-size: 3.5vw;
+      font-weight: 900;
+      color: #00ff41;
+      text-shadow: 0 0 10px #00ff41, 0 2px 8px #000;
+      font-family: 'Consolas', 'Courier New', monospace;
+      letter-spacing: 2px;
+      min-height: 1.2em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .shot-clock-time.warning {
+      color: #ff9500;
+      text-shadow: 0 0 10px #ff9500, 0 2px 8px #000;
+      animation: pulse 1s infinite;
+    }
+    
+    .shot-clock-time.critical {
+      color: #ff0000;
+      text-shadow: 0 0 15px #ff0000, 0 2px 8px #000;
+      animation: flash 0.5s infinite;
+    }
+    
+    .shot-clock.hidden {
+      display: none;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+    
+    @keyframes flash {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+  </style>
+  <script>
+    {{ js|safe }}
+  </script>
+</head>
+<body>
+  <script>
+    function logoUrl(name) {
+      return '/logos/' + name.replace(/\s+/g, '').toLowerCase() + '.svg';
+    }
+    function fitTextToContainer(h2id) {
+      const h2 = document.getElementById(h2id);
+      if (!h2) return;
+      const span = h2.querySelector('span') || h2;
+      span.style.fontSize = '';
+      let fontSize = 70; // start large
+      const minFontSize = 12;
+      const containerWidth = h2.offsetWidth - 2;
+      span.style.fontSize = fontSize + 'px';
+      while (span.scrollWidth > containerWidth && fontSize > minFontSize) {
+        fontSize -= 1;
+        span.style.fontSize = fontSize + 'px';
+      }
+    }
+
+    async function refresh() {
+      let res = await fetch('/state');
+      let data = await res.json();
+      // Home
+      document.getElementById("home-logo").src = logoUrl(data.team1.name);
+      document.getElementById("home-name").querySelector('span').innerText = data.team1.name;
+      const homeScore = document.getElementById("home-score");
+      if (data.hide_scores) {
+        homeScore.style.display = 'none';
+      } else {
+        homeScore.style.display = 'flex';
+        homeScore.innerText = data.team1.score;
+      }
+      document.getElementById("section-home").style.background = data.team1.color;
+      // Away
+      document.getElementById("away-logo").src = logoUrl(data.team2.name);
+      document.getElementById("away-name").querySelector('span').innerText = data.team2.name;
+      const awayScore = document.getElementById("away-score");
+      if (data.hide_scores) {
+        awayScore.style.display = 'none';
+      } else {
+        awayScore.style.display = 'flex';
+        awayScore.innerText = data.team2.score;
+      }
+      document.getElementById("section-away").style.background = data.team2.color;
+      // Period
+      document.getElementById("period-label").innerText = "Period:";
+      document.getElementById("period-value").innerText = data.period;
+      // Hide scores message
+      const hideMessage = document.getElementById("hide-message");
+      if (hideMessage) {
+        hideMessage.style.display = data.hide_scores ? "block" : "none";
+      }
+      // Man up
+      document.getElementById("home-manup").style.display = data.team1.manup ? "block" : "none";
+      document.getElementById("away-manup").style.display = data.team2.manup ? "block" : "none";
+      
+      // Shot Clock
+      updateShotClock(data.shot_clock);
+      
+      // Fit team names
+      fitTextToContainer('home-name');
+      fitTextToContainer('away-name');
+    }
+    
+    function updateShotClock(shotClockData) {
+      const shotClockElement = document.getElementById("shot-clock");
+      const shotClockTimeElement = document.getElementById("shot-clock-time");
+      
+      if (!shotClockData || !shotClockData.visible) {
+        shotClockElement.classList.add("hidden");
+        return;
+      }
+      
+      shotClockElement.classList.remove("hidden");
+      
+      let timeText = shotClockData.time || '--';
+      
+      // Clean up the OCR text - remove extra spaces and non-digit characters except ":"
+      timeText = timeText.replace(/[^\d:]/g, '').trim();
+      
+      // If no valid time, show dashes
+      if (!timeText || timeText === '') {
+        timeText = '--';
+      }
+      
+      shotClockTimeElement.textContent = timeText;
+      
+      // Apply styling based on time value
+      shotClockTimeElement.classList.remove('warning', 'critical');
+      
+      // Parse time for styling (assuming format like "24", "05", "30", etc.)
+      const timeValue = parseInt(timeText.replace(':', ''));
+      
+      if (!isNaN(timeValue)) {
+        if (timeValue <= 5) {
+          shotClockTimeElement.classList.add('critical');
+        } else if (timeValue <= 10) {
+          shotClockTimeElement.classList.add('warning');
+        }
+      }
+    }
+    setInterval(refresh, 100); window.onload = refresh;
+  </script>
+  <div class="scoreboard">
+    <!-- Home Section: image, name, score -->
+    <div id="section-home" class="section-home" style="background: {{ team1_color }};">
+      <img id="home-logo" class="team-logo" src="/logos/{{ team1_logo }}" alt="Home Logo">
+      <div class="team-info">
+  <div class="team-name"><h2 id="home-name"><span>{{ team1_name }}</span></h2></div>
+        <span id="home-manup" class="manup-text" style="display:none;">MAN UP</span>
+      </div>
+      <div class="score left" id="home-score">{{ team1_score }}</div>
+    </div>
+    <!-- Period Section -->
+    <div class="section-period">
+      <span class="period-label" id="period-label">Period</span>
+      <span class="period-value" id="period-value">{{ period }}</span>
+    </div>
+    <!-- Away Section: score, name, image (mirrored) -->
+    <div id="section-away" class="section-away" style="background: {{ team2_color }};">
+      <div class="score right" id="away-score">{{ team2_score }}</div>
+      <div class="team-info">
+  <div class="team-name"><h2 id="away-name"><span>{{ team2_name }}</span></h2></div>
+        <span id="away-manup" class="manup-text" style="display:none;">MAN UP</span>
+      </div>
+      <img id="away-logo" class="team-logo right" src="/logos/{{ team2_logo }}" alt="Away Logo">
+    </div>
+    <!-- Hide scores message inside the scoreboard -->
+    <div style="position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); text-align: center;">
+      <span id="hide-message" style="font-size: 0.8vw; color: #000; display:{% if hide_scores %}block{% else %}none{% endif %};">Sorry we have no one to operate the stream</span>
+    </div>
+  </div>
+  
+  <!-- Shot Clock -->
+  <div id="shot-clock" class="shot-clock">
+    <div class="shot-clock-label">SHOT CLOCK</div>
+    <div id="shot-clock-time" class="shot-clock-time">--</div>
+  </div>
+</body>
+</html>

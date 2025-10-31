@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Schedule</title>
+  <style>
+body { background: transparent; color: #fff; font-family: Arial, sans-serif; margin: 0; }
+.sched-container {
+  width: 100%;
+  max-width: 1400px;
+  margin: 40px auto;
+  padding: 56px 48px;
+  background: rgba(30, 30, 40, 0.65);
+  border-radius: 32px;
+  box-shadow: 0 8px 32px 0 rgba(0,0,0,0.25), 0 1.5px 8px 0 rgba(0,0,0,0.10);
+  backdrop-filter: blur(8px);
+}
+.sched-day {
+  text-align: center;
+  font-size: 3em;
+  font-weight: bold;
+  margin-bottom: 48px;
+  letter-spacing: 2.5px;
+}
+    .sched-row {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
+      align-items: stretch;
+      background: #292929;
+      border-radius: 24px;
+      overflow: hidden;
+      box-shadow: 0 2px 16px #0006;
+      min-width: 0;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    .sched-time {
+      flex: 0 0 120px;
+      font-size: 1.7em;
+      font-weight: bold;
+      color: #FFD700;
+      text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .sched-team {
+      flex: 1 1 0;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 1.5em;
+      font-weight: bold;
+      padding: 16px 0;
+      border-radius: 16px;
+      justify-content: flex-start;
+      box-sizing: border-box;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .sched-logo {
+      width: 48px;
+      height: 48px;
+      object-fit: contain;
+      background: #fff2;
+      border-radius: 12px;
+      flex-shrink: 0;
+    }
+    .sched-vs {
+      flex: 0 0 72px;
+      max-width: 72px;
+      min-width: 72px;
+      font-size: 2em;
+      font-weight: bold;
+      color: #aaa;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      background: transparent;
+      z-index: 1;
+    }
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+  .sched-logo { width: 32px; height: 32px; object-fit: contain; background: #fff2; border-radius: 8px; flex-shrink: 0; }
+    .sched-row {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
+      align-items: stretch;
+      background: #292929;
+      border-radius: 18px;
+      overflow: hidden;
+      box-shadow: 0 2px 12px #0004;
+      min-width: 0;
+    }
+      height: 100%;
+    }
+  </style>
+  <script>
+    const schedule = {{ days|tojson }};
+    const teams = {{ teams|tojson }};
+    const daysList = {{ days_list|tojson }};
+    let dayIdx = 0;
+    function logoUrl(name) {
+      return '/logos/' + name.replace(/\s+/g, '').toLowerCase() + '.svg';
+    }
+    function renderDay(idx) {
+      const day = daysList[idx];
+      const games = schedule[day];
+  // Parse as local time (YYYY-MM-DD)
+      const [year, month, date] = day.split('-').map(Number);
+      const localDate = new Date(year, month - 1, date);
+      document.getElementById('sched-day').innerText = localDate.toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'short', day:'numeric'});
+      let html = '';
+      for (const game of games) {
+        const home = teams[game.home];
+        const away = teams[game.away];
+        const time24 = game.start_time.split(' ')[1];
+        // Convert 24-hour time to 12-hour US notation with AM/PM
+        let [h, m] = time24.split(':');
+        h = parseInt(h, 10);
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        let h12 = h % 12;
+        if (h12 === 0) h12 = 12;
+        const timeUS = `${h12}:${m} ${ampm}`;
+        html += `<div class='sched-row'>
+          <div class='sched-time'>${timeUS}</div>
+          <div class='sched-team' style='background:${home.home_bg};color:${home.home_text};'>
+            <img class='sched-logo' src='${logoUrl(game.home)}' alt='${game.home} logo'>
+            <span>${game.home}</span>
+          </div>
+          <div class='sched-vs'>vs</div>
+          <div class='sched-team' style='background:${away.away_bg};color:${away.away_text};'>
+            <img class='sched-logo' src='${logoUrl(game.away)}' alt='${game.away} logo'>
+            <span>${game.away}</span>
+          </div>
+        </div>`;
+      }
+      document.getElementById('sched-list').innerHTML = html;
+    }
+    function nextDay() {
+      dayIdx = (dayIdx + 1) % daysList.length;
+      renderDay(dayIdx);
+    }
+    window.onload = function() {
+      renderDay(dayIdx);
+      setInterval(nextDay, 15000);
+    };
+  </script>
+</head>
+<body>
+  <div class="sched-container">
+    <div class="sched-day" id="sched-day"></div>
+    <div class="sched-list" id="sched-list"></div>
+  </div>
+</body>
+</html>

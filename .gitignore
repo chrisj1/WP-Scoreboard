@@ -1,0 +1,30 @@
+# Large video files - do not commit to git
+*.MOV
+*.mov
+*.MP4
+*.mp4
+*.avi
+*.AVI
+*.mkv
+*.MKV
+
+# Large model files
+*.pth
+*.pt
+
+# Dataset directories with many files
+shotclock dataset/
+game_clock_dataset/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+*.exp
+*.def
+
+# VS Code
+.vscode/

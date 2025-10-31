@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Configuration</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .config-group {
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .config-group h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        select, input[type="number"], input[type="text"] {
+            width: 100%;
+            max-width: 200px;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        input[type="checkbox"] {
+            margin-right: 8px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .test-button {
+            background-color: #28a745;
+        }
+        .test-button:hover {
+            background-color: #1e7e34;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+        .result.success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .result.error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .video-frame {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .video-frame img {
+            max-width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .image-analysis {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .debug-image {
+            text-align: center;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+            background: #f9f9f9;
+        }
+        .debug-image img {
+            max-width: 100%;
+            max-height: 300px;
+            border: 1px solid #ccc;
+        }
+        .image-stats {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .stat-good { color: #28a745; }
+        .stat-warning { color: #ffc107; }
+        .stat-bad { color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>OCR Configuration for Shot Clock</h1>
+        
+        <div class="config-group">
+            <h3>OCR Engine</h3>
+            <label for="ocr_engine">OCR Engine:</label>
+            <select id="ocr_engine">
+                <option value="tesseract">Tesseract (Traditional, more configurable)</option>
+                <option value="easyocr">EasyOCR (AI-based, more robust)</option>
+            </select>
+            <small>EasyOCR often works better with digital displays but is slower to initialize</small>
+        </div>
+        
+        <div class="config-group">
+            <h3>Camera Selection</h3>
+            <label for="camera_select">Active Camera:</label>
+            <select id="camera_select">
+                <option value="">Loading cameras...</option>
+            </select>
+            <button type="button" onclick="refreshCameras()">🔄 Refresh Cameras</button>
+            <button type="button" onclick="testSelectedCamera()">🎥 Test Camera</button>
+            <button type="button" onclick="setSelectedCamera()">✅ Set Camera</button>
+            <small>Select the camera to use for shot clock monitoring</small>
+            <div id="camera_status" style="margin-top: 10px; padding: 8px; border-radius: 4px; display: none;"></div>
+            <div id="selected_camera_display" style="margin-top: 8px; font-weight: bold; color: #007bff;"></div>
+        </div>
+        
+        <div class="config-group tesseract-only">
+            <h3>Page Segmentation Mode (PSM)</h3>
+            <label for="psm_mode">PSM Mode:</label>
+            <select id="psm_mode">
+                <option value="6">6 - Uniform block of text</option>
+                <option value="7">7 - Single text line</option>
+                <option value="8" selected>8 - Single word (Recommended for shot clocks)</option>
+                <option value="10">10 - Single character</option>
+                <option value="13">13 - Raw line (no heuristics)</option>
+            </select>
+            <small>PSM 8 works best for shot clocks and short numeric displays</small>
+        </div>
+
+        <div class="config-group tesseract-only">
+            <h3>OCR Engine Mode (OEM)</h3>
+            <label for="oem_mode">OEM Mode:</label>
+            <select id="oem_mode">
+                <option value="0">0 - Legacy engine only</option>
+                <option value="1">1 - Neural nets LSTM only</option>
+                <option value="2">2 - Legacy + LSTM</option>
+                <option value="3">3 - Default (based on language)</option>
+            </select>
+            <small>OEM 1 (LSTM) is often better for digital displays</small>
+        </div>
+
+        <div class="config-group tesseract-only">
+            <h3>Language Model</h3>
+            <label for="language">Language/Model:</label>
+            <select id="language">
+                <option value="eng">eng - Standard English</option>
+                <option value="ssd">ssd - Seven Segment Display (Recommended for shot clocks)</option>
+                <option value="7seg">7seg - Seven Segment Display (Alternative)</option>
+                <option value="ssd_int">ssd_int - SSD Integer-only</option>
+                <option value="ssd_plus">ssd_plus - Enhanced SSD Model</option>
+                <option value="ssd_alphanum_plus">ssd_alphanum_plus - SSD with letters and numbers</option>
+            </select>
+            <small>SSD models are specifically trained for digital displays</small>
+        </div>
+
+        <div class="config-group">
+            <h3>Character Recognition</h3>
+            <label for="char_whitelist">Character Whitelist:</label>
+            <input type="text" id="char_whitelist" placeholder="0123456789">
+            <small>Only these characters will be recognized</small>
+        </div>
+
+        <div class="config-group">
+            <h3>Image Processing</h3>
+            <label for="preprocessing">Preprocessing Method:</label>
+            <select id="preprocessing">
+                <option value="original">Original (no processing)</option>
+                <option value="threshold">Binary threshold</option>
+                <option value="inverted">Inverted threshold</option>
+                <option value="enhanced">Enhanced contrast</option>
+                <option value="morph_close">Morphological closing</option>
+                <option value="dilated">Horizontal dilation</option>
+                <option value="aggressive_morph">🔥 Aggressive morphology</option>
+                <option value="extreme_contrast">🔥 Extreme contrast</option>
+                <option value="edge_enhance">🔥 Edge enhancement</option>
+            </select>
+            
+            <label for="scale_factor">Scale Factor:</label>
+            <input type="number" id="scale_factor" min="1" max="12" value="6">
+            <small>Larger values may help with small text (try 8-10x for segmented displays)</small>
+        </div>
+
+        <div class="config-group">
+            <h3>Quality Settings</h3>
+            <label for="confidence_threshold">Confidence Threshold:</label>
+            <input type="number" id="confidence_threshold" min="0" max="100" value="30">
+            <small>Minimum confidence to accept OCR result (0-100)</small>
+            
+            <br><br>
+            <label>
+                <input type="checkbox" id="use_multiple_methods"> 
+                Use multiple preprocessing methods
+            </label>
+            
+            <label>
+                <input type="checkbox" id="debug_mode" checked> 
+                Save debug images
+            </label>
+        </div>
+
+        <div style="text-align: center; margin: 20px 0;">
+            <button onclick="loadCurrentConfig()">Load Current Config</button>
+            <button onclick="updateConfig()">Update Config</button>
+            <button class="test-button" onclick="testOCR()">Test OCR</button>
+            <button onclick="window.location.href='/'">Back to Main</button>
+        </div>
+        
+        <div style="text-align: center; margin: 20px 0; border-top: 1px solid #ddd; padding-top: 20px;">
+            <h3>Quick Presets for Segmented Displays</h3>
+            <button onclick="loadPreset('segmented_light')" style="background: #28a745;">Light Segmented Display</button>
+            <button onclick="loadPreset('segmented_dark')" style="background: #6f42c1;">Dark Segmented Display</button>
+            <button onclick="loadPreset('lcd_display')" style="background: #fd7e14;">LCD Display</button>
+            <button onclick="loadPreset('high_contrast')" style="background: #dc3545;">High Contrast</button>
+            <button onclick="loadPreset('aggressive_fix')" style="background: #ff1744; color: white;">🔥 AGGRESSIVE FIX</button>
+        </div>
+
+        <div id="result" class="result" style="display: none;"></div>
+        
+        <div class="image-analysis">
+            <div class="debug-image">
+                <h3>Processed Image (sent to Tesseract)</h3>
+                <img id="processed-image" src="" alt="No image processed yet" style="display: none;">
+                <p id="no-image-msg">No image processed yet</p>
+            </div>
+            
+            <div class="image-stats">
+                <h3>Image Statistics</h3>
+                <div id="stats-content">No statistics available</div>
+            </div>
+        </div>
+        
+        <div class="video-frame">
+            <h3>Current Video Frame</h3>
+            <img id="video_preview" src="/video_frame" alt="Video frame will appear here">
+            <br>
+            <button onclick="refreshFrame()">Refresh Frame</button>
+        </div>
+
+        <div class="config-group" style="background-color: #fff3cd; border-color: #ffeaa7;">
+            <h3>🚨 Troubleshooting for Stubborn Displays</h3>
+            <p><strong>If nothing works, try these emergency steps:</strong></p>
+            <ol>
+                <li><strong>Click "🔥 AGGRESSIVE FIX"</strong> - Uses maximum settings</li>
+                <li><strong>Try each 🔥 preprocessing method</strong> individually with 12x scale</li>
+                <li><strong>Lower confidence to 1-5%</strong> to catch any recognition</li>
+                <li><strong>Enable "Use multiple methods"</strong> to try everything</li>
+                <li><strong>Check crop area</strong> - make sure it's tightly around the numbers</li>
+            </ol>
+            <button onclick="emergencySettings()" style="background: #e74c3c; color: white; width: 100%;">
+                🆘 EMERGENCY SETTINGS (Try Everything!)
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // Load current configuration on page load
+        window.onload = function() {
+            loadCurrentConfig();
+            loadCameras(); // Load available cameras
+            setInterval(refreshFrame, 2000); // Auto-refresh frame every 2 seconds
+            
+            // Add event listener for OCR engine selection
+            document.getElementById('ocr_engine').addEventListener('change', function() {
+                toggleTesseractOptions(this.value);
+            });
+            
+            // Add change listener to camera select
+            document.getElementById('camera_select').addEventListener('change', selectCamera);
+        };
+
+        function loadPreset(presetName) {
+            const presets = {
+                'segmented_light': {
+                    psm_mode: 6,
+                    oem_mode: 1,  // LSTM neural nets
+                    language: 'ssd',  // SSD model for seven-segment displays
+                    char_whitelist: '0123456789',
+                    scale_factor: 6,  // Optimal scaling based on analysis
+                    preprocessing: 'threshold',  // Clean binary conversion
+                    confidence_threshold: 30,  // Realistic threshold
+                    use_multiple_methods: false,
+                    debug_mode: true
+                },
+                'segmented_dark': {
+                    psm_mode: 6,  // Works best with SSD
+                    oem_mode: 1,  // LSTM neural nets
+                    language: 'ssd',  // SSD model
+                    char_whitelist: '0123456789',
+                    scale_factor: 6,  // Optimal scaling
+                    preprocessing: 'inverted',  // For dark backgrounds
+                    confidence_threshold: 25,  // Lower threshold for dark displays
+                    use_multiple_methods: false,
+                    debug_mode: true
+                },
+                'lcd_display': {
+                    psm_mode: 7,
+                    oem_mode: 1,
+                    language: 'ssd',  // SSD model
+                    char_whitelist: '0123456789',
+                    scale_factor: 4,
+                    preprocessing: 'enhanced',  // Better contrast
+                    confidence_threshold: 25,
+                    use_multiple_methods: false,
+                    debug_mode: true
+                },
+                'high_contrast': {
+                    psm_mode: 6,  // Block of text
+                    oem_mode: 1,  // LSTM
+                    language: 'ssd',  // SSD model
+                    char_whitelist: '0123456789',
+                    scale_factor: 8,
+                    preprocessing: 'threshold',
+                    confidence_threshold: 10,  // Very low threshold
+                    use_multiple_methods: true,  // Try multiple methods
+                    debug_mode: true
+                },
+                'aggressive_fix': {
+                    psm_mode: 6,  // Works best with SSD based on analysis
+                    oem_mode: 1,  // LSTM neural networks
+                    language: 'ssd',  // SSD model
+                    char_whitelist: '0123456789',
+                    scale_factor: 6,  // Optimal scaling
+                    preprocessing: 'dilated',  // Connect separated segments
+                    confidence_threshold: 5,  // Accept almost anything
+                    use_multiple_methods: true,  // Try all methods
+                    debug_mode: true
+                }
+            };
+            
+            const preset = presets[presetName];
+            if (preset) {
+                // Load preset values into form
+                document.getElementById('psm_mode').value = preset.psm_mode;
+                document.getElementById('oem_mode').value = preset.oem_mode;
+                document.getElementById('language').value = preset.language || 'eng';
+                document.getElementById('char_whitelist').value = preset.char_whitelist;
+                document.getElementById('scale_factor').value = preset.scale_factor;
+                document.getElementById('preprocessing').value = preset.preprocessing;
+                document.getElementById('confidence_threshold').value = preset.confidence_threshold;
+                document.getElementById('use_multiple_methods').checked = preset.use_multiple_methods;
+                document.getElementById('debug_mode').checked = preset.debug_mode;
+                
+                // Automatically apply the preset
+                updateConfig();
+                
+                showResult(`Loaded preset: ${presetName}`, 'success');
+            }
+        }
+
+        function emergencySettings() {
+            // Ultra-aggressive settings when nothing else works
+            document.getElementById('psm_mode').value = 13;  // Raw line, no heuristics
+            document.getElementById('oem_mode').value = 1;   // LSTM only
+            document.getElementById('char_whitelist').value = '0123456789';
+            document.getElementById('scale_factor').value = 12;  // Maximum scale
+            document.getElementById('preprocessing').value = 'aggressive_morph';
+            document.getElementById('confidence_threshold').value = 1;  // Accept almost anything
+            document.getElementById('use_multiple_methods').checked = true;
+            document.getElementById('debug_mode').checked = true;
+            
+            // Apply immediately
+            updateConfig();
+            
+            showResult('🆘 EMERGENCY SETTINGS APPLIED! This will try the most aggressive OCR settings possible.', 'error');
+        }
+
+        function loadCurrentConfig() {
+            fetch('/get_ocr_config')
+                .then(response => response.json())
+                .then(config => {
+                    document.getElementById('ocr_engine').value = config.engine || 'tesseract';
+                    document.getElementById('psm_mode').value = config.psm_mode;
+                    document.getElementById('oem_mode').value = config.oem_mode;
+                    document.getElementById('language').value = config.language || 'eng';
+                    document.getElementById('char_whitelist').value = config.char_whitelist;
+                    document.getElementById('scale_factor').value = config.scale_factor;
+                    document.getElementById('preprocessing').value = config.preprocessing;
+                    document.getElementById('confidence_threshold').value = config.confidence_threshold;
+                    document.getElementById('use_multiple_methods').checked = config.use_multiple_methods;
+                    document.getElementById('debug_mode').checked = config.debug_mode;
+                    
+                    // Show/hide Tesseract-specific options based on engine selection
+                    toggleTesseractOptions(config.engine || 'tesseract');
+                })
+                .catch(error => {
+                    showResult('Error loading config: ' + error, 'error');
+                });
+        }
+        
+        function toggleTesseractOptions(engine) {
+            const tesseractOptions = document.querySelectorAll('.tesseract-only');
+            tesseractOptions.forEach(option => {
+                option.style.display = engine === 'tesseract' ? 'block' : 'none';
+            });
+        }
+
+        function updateConfig() {
+            const config = {
+                engine: document.getElementById('ocr_engine').value,
+                psm_mode: parseInt(document.getElementById('psm_mode').value),
+                oem_mode: parseInt(document.getElementById('oem_mode').value),
+                language: document.getElementById('language').value,
+                char_whitelist: document.getElementById('char_whitelist').value,
+                scale_factor: parseInt(document.getElementById('scale_factor').value),
+                preprocessing: document.getElementById('preprocessing').value,
+                confidence_threshold: parseInt(document.getElementById('confidence_threshold').value),
+                use_multiple_methods: document.getElementById('use_multiple_methods').checked,
+                debug_mode: document.getElementById('debug_mode').checked
+            };
+
+            fetch('/update_ocr_config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(config)
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    showResult('Configuration updated successfully!', 'success');
+                } else {
+                    showResult('Error: ' + (result.error || 'Unknown error'), 'error');
+                }
+            })
+            .catch(error => {
+                showResult('Error updating config: ' + error, 'error');
+            });
+        }
+
+        function testOCR() {
+            showResult('Testing OCR...', 'success');
+            
+            fetch('/test_ocr_with_config')
+                .then(response => response.json())
+                .then(result => {
+                    if (result.error) {
+                        showResult('Error: ' + result.error, 'error');
+                    } else {
+                        // Add safety checks for undefined values
+                        const confidence = result.confidence || 0;
+                        const meanBrightness = result.mean_brightness || 0;
+                        const textLength = result.text ? result.text.length : 0;
+                        
+                        const resultText = `
+📊 OCR RESULT ANALYSIS:
+═══════════════════════
+
+🎯 Text Found: "${result.text || ''}" ${textLength > 1 ? '✓ Multi-digit' : '⚠️ Single digit'}
+📈 Confidence: ${confidence.toFixed(1)}% ${result.meets_threshold ? '✅ GOOD' : '❌ TOO LOW'}
+
+⚙️ SETTINGS USED:
+PSM Mode: ${result.config_used ? (result.config_used.match(/--psm (\d+)/)?.[1] || 'Unknown') : 'Unknown'}
+OEM Mode: ${result.config_used ? (result.config_used.match(/--oem (\d+)/)?.[1] || 'Unknown') : 'Unknown'}
+Preprocessing: ${result.preprocessing || 'Unknown'}
+Scale Factor: ${result.scale_factor || 1}x
+
+📏 IMAGE INFO:
+Original: ${result.frame_size || 'Unknown'}
+Processed: ${result.processed_size || 'Unknown'}
+Brightness: ${meanBrightness.toFixed(1)} ${meanBrightness < 100 ? '(Dark - try inverted)' : '(Bright - try threshold)'}
+
+💡 SUGGESTIONS:
+${confidence < 20 ? '• Try "inverted" preprocessing for dark displays\n• Increase scale factor to 8-10x\n• Lower confidence threshold to 10-15' : ''}
+${textLength === 1 ? '• Try "dilated" preprocessing to connect digits\n• Use PSM 7 (single line) instead of PSM 8\n• Enable multiple methods' : ''}
+${!result.meets_threshold ? '• Lower the confidence threshold\n• Try LSTM engine (OEM 1)' : ''}
+                        `;
+                        showResult(resultText, result.meets_threshold && confidence > 30 ? 'success' : 'error');
+                        
+                        // Update processed image and statistics
+                        updateImageAnalysis(result);
+                    }
+                })
+                .catch(error => {
+                    showResult('Error testing OCR: ' + error, 'error');
+                });
+        }
+
+        function updateImageAnalysis(result) {
+            // Update processed image
+            const processedImg = document.getElementById('processed-image');
+            const noImageMsg = document.getElementById('no-image-msg');
+            
+            if (result.debug_filename) {
+                processedImg.src = '/debug_image/' + result.debug_filename + '?' + new Date().getTime();
+                processedImg.style.display = 'block';
+                noImageMsg.style.display = 'none';
+            } else {
+                processedImg.style.display = 'none';
+                noImageMsg.style.display = 'block';
+                noImageMsg.textContent = 'No debug image available';
+            }
+            
+            // Update statistics
+            const statsContent = document.getElementById('stats-content');
+            if (result.image_stats) {
+                const stats = result.image_stats;
+                const confidence = result.confidence || 0;
+                const textLength = result.text ? result.text.length : 0;
+                
+                // Safe access to statistics with fallbacks
+                const width = stats.width || 0;
+                const height = stats.height || 0;
+                const meanBrightness = stats.mean_brightness || 0;
+                const minBrightness = stats.min_brightness || 0;
+                const maxBrightness = stats.max_brightness || 0;
+                const stdBrightness = stats.std_brightness || 0;  // Fixed property name
+                const binaryPixelCount = stats.binary_pixel_count || stats.white_pixels || 0;
+                
+                const contrastRatio = (maxBrightness - minBrightness) / 255.0;
+                const totalPixels = width * height;
+                const binaryPercent = totalPixels > 0 ? (binaryPixelCount / totalPixels) * 100 : 0;
+                
+                statsContent.innerHTML = `
+<strong>Dimensions:</strong><br>
+Width: ${width}px<br>
+Height: ${height}px<br>
+<br>
+<strong>Brightness Analysis:</strong><br>
+Mean: <span class="${getBrightnessClass(meanBrightness)}">${meanBrightness.toFixed(1)}</span><br>
+Min: ${minBrightness}<br>
+Max: ${maxBrightness}<br>
+Std Dev: ${stdBrightness.toFixed(1)}<br>
+<br>
+<strong>Quality Metrics:</strong><br>
+Contrast Ratio: <span class="${getContrastClass(contrastRatio)}">${(contrastRatio * 100).toFixed(1)}%</span><br>
+Binary Pixels: ${binaryPixelCount} (${binaryPercent.toFixed(1)}%)<br>
+<br>
+<strong>OCR Quality:</strong><br>
+Text Length: <span class="${getTextLengthClass(textLength)}">${textLength} chars</span><br>
+Confidence: <span class="${getConfidenceClass(confidence)}">${confidence.toFixed(1)}%</span><br>
+<br>
+<strong>Recommendations:</strong><br>
+${getRecommendations(stats, result)}
+                `;
+            } else {
+                statsContent.innerHTML = 'No statistics available';
+            }
+        }
+        
+        function getBrightnessClass(brightness) {
+            if (brightness < 50) return 'stat-bad';
+            if (brightness > 200) return 'stat-good';
+            return 'stat-warning';
+        }
+        
+        function getContrastClass(ratio) {
+            if (ratio > 0.7) return 'stat-good';
+            if (ratio > 0.4) return 'stat-warning';
+            return 'stat-bad';
+        }
+        
+        function getTextLengthClass(length) {
+            if (length > 1) return 'stat-good';
+            if (length === 1) return 'stat-warning';
+            return 'stat-bad';
+        }
+        
+        function getConfidenceClass(confidence) {
+            if (confidence > 70) return 'stat-good';
+            if (confidence > 30) return 'stat-warning';
+            return 'stat-bad';
+        }
+        
+        function getRecommendations(stats, result) {
+            const recommendations = [];
+            
+            // Safe access to properties
+            const meanBrightness = stats.mean_brightness || 0;
+            const minBrightness = stats.min_brightness || 0;
+            const maxBrightness = stats.max_brightness || 0;
+            const width = stats.width || 0;
+            const height = stats.height || 0;
+            const confidence = result.confidence || 0;
+            const textLength = result.text ? result.text.length : 0;
+            const binaryPixelCount = stats.binary_pixel_count || stats.white_pixels || 0;
+            
+            if (meanBrightness < 100) {
+                recommendations.push("• Try 'inverted' preprocessing");
+            }
+            
+            const contrastRatio = (maxBrightness - minBrightness) / 255.0;
+            if (contrastRatio < 0.5) {
+                recommendations.push("• Low contrast - try 'enhanced' preprocessing");
+            }
+            
+            if (confidence < 50) {
+                recommendations.push("• Try different PSM mode (6 or 7)");
+                recommendations.push("• Increase scale factor");
+            }
+            
+            if (textLength <= 1) {
+                recommendations.push("• Use 'dilated' to connect digits");
+                recommendations.push("• Try PSM 7 for single line text");
+            }
+            
+            const totalPixels = width * height;
+            if (totalPixels > 0 && (binaryPixelCount / totalPixels) < 0.1) {
+                recommendations.push("• Very few white pixels - check thresholding");
+            }
+            
+            return recommendations.length > 0 ? recommendations.join('<br>') : '✅ Image quality looks good!';
+        }
+
+        function refreshFrame() {
+            const img = document.getElementById('video_preview');
+            img.src = '/video_frame?' + new Date().getTime();
+        }
+
+        function showResult(message, type) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.textContent = message;
+            resultDiv.className = 'result ' + type;
+            resultDiv.style.display = 'block';
+        }
+
+        // Camera management functions
+        function loadCameras() {
+            fetch('/api/cameras/list')
+                .then(response => response.json())
+                .then(data => {
+                    const select = document.getElementById('camera_select');
+                    select.innerHTML = '';
+                    
+                    if (data.cameras && data.cameras.length > 0) {
+                        data.cameras.forEach(camera => {
+                            const option = document.createElement('option');
+                            option.value = camera.id;
+                            option.textContent = `${camera.name} (ID: ${camera.id})${camera.working ? '' : ' [Not Working]'}`;
+                            if (!camera.working) {
+                                option.style.color = '#dc3545';
+                            }
+                            select.appendChild(option);
+                        });
+                        
+                        showCameraStatus(`Found ${data.cameras.length} camera(s) on ${data.platform}`, 'success');
+                        // Show the first as selected by default
+                        if (select.selectedIndex >= 0) {
+                            document.getElementById('selected_camera_display').textContent = `Selected: ${select.options[select.selectedIndex].textContent}`;
+                        }
+                    } else {
+                        select.innerHTML = '<option value="">No cameras detected</option>';
+                        showCameraStatus('No cameras detected', 'error');
+                        document.getElementById('selected_camera_display').textContent = '';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading cameras:', error);
+                    const select = document.getElementById('camera_select');
+                    select.innerHTML = '<option value="">Error loading cameras</option>';
+                    showCameraStatus('Error loading cameras: ' + error.message, 'error');
+                    document.getElementById('selected_camera_display').textContent = '';
+                });
+        }
+
+        function refreshCameras() {
+            const select = document.getElementById('camera_select');
+            select.innerHTML = '<option value="">Refreshing cameras...</option>';
+            showCameraStatus('Refreshing camera list...', 'info');
+            
+            fetch('/api/cameras/refresh')
+                .then(response => response.json())
+                .then(data => {
+                    const select = document.getElementById('camera_select');
+                    select.innerHTML = '';
+                    
+                    if (data.cameras && data.cameras.length > 0) {
+                        data.cameras.forEach(camera => {
+                            const option = document.createElement('option');
+                            option.value = camera.id;
+                            option.textContent = `${camera.name} (ID: ${camera.id})${camera.working ? '' : ' [Not Working]'}`;
+                            if (!camera.working) {
+                                option.style.color = '#dc3545';
+                            }
+                            select.appendChild(option);
+                        });
+                        
+                        showCameraStatus(`Refreshed! Found ${data.cameras.length} camera(s)`, 'success');
+                    } else {
+                        select.innerHTML = '<option value="">No cameras detected</option>';
+                        showCameraStatus('No cameras detected after refresh', 'warning');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error refreshing cameras:', error);
+                    showCameraStatus('Error refreshing cameras: ' + error.message, 'error');
+                });
+        }
+
+        function testSelectedCamera() {
+            const select = document.getElementById('camera_select');
+            const cameraId = select.value;
+            
+            if (!cameraId) {
+                showCameraStatus('Please select a camera to test', 'warning');
+                return;
+            }
+            
+            showCameraStatus('Testing camera...', 'info');
+            
+            fetch(`/api/cameras/${cameraId}/test`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.working) {
+                        showCameraStatus(`✅ Camera ${cameraId} is working properly`, 'success');
+                    } else {
+                        showCameraStatus(`❌ Camera ${cameraId} is not accessible`, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error testing camera:', error);
+                    showCameraStatus('Error testing camera: ' + error.message, 'error');
+                });
+        }
+
+        function setSelectedCamera() {
+            const select = document.getElementById('camera_select');
+            const cameraId = select.value;
+            const selectedOption = select.options[select.selectedIndex];
+            if (!cameraId) {
+                showCameraStatus('Please select a camera to set', 'warning');
+                return;
+            }
+            showCameraStatus('Switching camera...', 'info');
+            fetch(`/api/cameras/${cameraId}/select`, {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showCameraStatus(`✅ Switched to camera ${cameraId}: ${data.camera_info?.name || 'Unknown'}`, 'success');
+                        document.getElementById('selected_camera_display').textContent = `Selected: ${selectedOption.textContent}`;
+                        setTimeout(refreshFrame, 1000);
+                    } else {
+                        showCameraStatus(`❌ Failed to switch camera: ${data.error}`, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error selecting camera:', error);
+                    showCameraStatus('Error selecting camera: ' + error.message, 'error');
+                });
+        }
+
+        function selectCamera() {
+            const select = document.getElementById('camera_select');
+            const cameraId = select.value;
+            
+            if (!cameraId) {
+                showCameraStatus('Please select a camera', 'warning');
+                return;
+            }
+            
+            showCameraStatus('Switching camera...', 'info');
+            
+            fetch(`/api/cameras/${cameraId}/select`, {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showCameraStatus(`✅ Switched to camera ${cameraId}: ${data.camera_info?.name || 'Unknown'}`, 'success');
+                        // Refresh the video preview
+                        setTimeout(refreshFrame, 1000);
+                    } else {
+                        showCameraStatus(`❌ Failed to switch camera: ${data.error}`, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error selecting camera:', error);
+                    showCameraStatus('Error selecting camera: ' + error.message, 'error');
+                });
+        }
+
+        function showCameraStatus(message, type) {
+            const statusDiv = document.getElementById('camera_status');
+            statusDiv.textContent = message;
+            statusDiv.style.display = 'block';
+            
+            // Set colors based on type
+            switch(type) {
+                case 'success':
+                    statusDiv.style.backgroundColor = '#d4edda';
+                    statusDiv.style.color = '#155724';
+                    statusDiv.style.borderColor = '#c3e6cb';
+                    break;
+                case 'error':
+                    statusDiv.style.backgroundColor = '#f8d7da';
+                    statusDiv.style.color = '#721c24';
+                    statusDiv.style.borderColor = '#f5c6cb';
+                    break;
+                case 'warning':
+                    statusDiv.style.backgroundColor = '#fff3cd';
+                    statusDiv.style.color = '#856404';
+                    statusDiv.style.borderColor = '#ffeaa7';
+                    break;
+                case 'info':
+                    statusDiv.style.backgroundColor = '#d1ecf1';
+                    statusDiv.style.color = '#0c5460';
+                    statusDiv.style.borderColor = '#bee5eb';
+                    break;
+                default:
+                    statusDiv.style.backgroundColor = '#f8f9fa';
+                    statusDiv.style.color = '#212529';
+                    statusDiv.style.borderColor = '#dee2e6';
+            }
+            statusDiv.style.border = '1px solid';
+        }
+    </script>
+</body>
+</html>

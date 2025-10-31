@@ -1,0 +1,1407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Configuration & Pipeline</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .nav-buttons {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .nav-button {
+            display: inline-block;
+            background: #007bff;
+            color: white;
+            padding: 10px 20px;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 0 5px;
+        }
+        .nav-button:hover { background: #0056b3; }
+        
+        .section {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .section h3 {
+            color: #4CAF50;
+            margin-top: 0;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        
+        .two-column {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        .preview-container {
+            border: 2px solid #444;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+            min-height: 400px;
+        }
+        
+        .preview-container img {
+            max-width: 100%;
+            max-height: 350px;
+            border: 1px solid #666;
+        }
+        
+        .pipeline-container {
+            background: #333;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        
+        .pipeline-step {
+            background: linear-gradient(135deg, #2a4d3a 0%, #4a7c59 100%);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            border: 2px solid #4a7c59;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            position: relative;
+            cursor: move;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            margin: 5px;
+        }
+        
+        .pipeline-step:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.4);
+            border-color: #5a8c69;
+        }
+        
+        .pipeline-step .remove-btn {
+            background: rgba(255,255,255,0.2);
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            color: white;
+            width: 22px;
+            height: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            margin-left: 8px;
+            transition: all 0.2s ease;
+            opacity: 0.7;
+        }
+        
+        .pipeline-step .remove-btn:hover {
+            background: #d32f2f;
+            border-color: #d32f2f;
+            opacity: 1;
+            transform: scale(1.1);
+            box-shadow: 0 2px 4px rgba(211, 47, 47, 0.4);
+        }
+        
+        .pipeline-step:hover .remove-btn {
+            opacity: 1;
+        }
+        
+        .pipeline-step:not(:last-child):after {
+            content: '→';
+            position: absolute;
+            right: -15px;
+            color: #fff;
+            font-weight: bold;
+        }
+        
+        .step-button {
+            background: linear-gradient(135deg, #333 0%, #555 100%);
+            color: white;
+            border: 2px solid #666;
+            border-radius: 8px;
+            padding: 12px 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 12px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .step-button:hover {
+            background: linear-gradient(135deg, #555 0%, #777 100%);
+            border-color: #4CAF50;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(76, 175, 80, 0.3);
+        }
+        
+        .step-button:active {
+            transform: translateY(0);
+        }
+        
+        .drag-zone {
+            border: 2px dashed #666;
+            border-radius: 8px;
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #999;
+            background: rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .drag-zone.drag-over {
+            border-color: #4CAF50;
+            background: rgba(76, 175, 80, 0.1);
+            color: #4CAF50;
+        }
+        
+        #pipeline-empty {
+            display: none;
+        }
+        
+        #pipeline-container.empty #pipeline-empty {
+            display: block;
+        }
+        
+        #pipeline-container.empty #pipeline-steps {
+            display: none;
+        }
+        
+        .pipeline-builder {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+        
+        .step-selector {
+            display: inline-block;
+            margin: 5px;
+        }
+        
+        .step-selector select, .step-selector input {
+            padding: 5px;
+            border-radius: 4px;
+            border: 1px solid #666;
+            background: #444;
+            color: #fff;
+        }
+        
+        .control-group {
+            margin: 10px 0;
+        }
+        
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #ccc;
+        }
+        
+        .control-group input, .control-group select {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #666;
+            background: #444;
+            color: #fff;
+            width: 200px;
+        }
+        
+        .button {
+            background: #4CAF50;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        
+        .button:hover { background: #45a049; }
+        .button.secondary { background: #2196F3; }
+        .button.secondary:hover { background: #1976D2; }
+        .button.danger { background: #f44336; }
+        .button.danger:hover { background: #da190b; }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-running { background: #4CAF50; }
+        .status-stopped { background: #f44336; }
+        
+        .crop-selector {
+            position: relative;
+            display: inline-block;
+            cursor: crosshair;
+        }
+        
+        .crop-overlay {
+            position: absolute;
+            border: 2px dashed #00ff00;
+            background: rgba(0, 255, 0, 0.1);
+            pointer-events: none;
+        }
+        
+        .ocr-results {
+            background: #1a1a1a;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>OCR Configuration & Pipeline</h1>
+            <div class="nav-buttons">
+                <a href="/" class="nav-button">Home</a>
+                <a href="/config" class="nav-button">Scoreboard Config</a>
+                <a href="/overlay" class="nav-button">Overlay Display</a>
+            </div>
+        </div>
+        
+        <!-- Video Source Configuration -->
+        <div class="section">
+            <h3>Video Source Configuration</h3>
+            <div class="control-group">
+                <label>Video Source Type:</label>
+                <div>
+                    <input type="radio" id="source-camera" name="video-source" value="camera" checked onchange="updateSourceControls()">
+                    <label for="source-camera" style="display: inline; margin-left: 5px; margin-right: 15px;">Camera Device</label>
+                    <input type="radio" id="source-file" name="video-source" value="file" onchange="updateSourceControls()">
+                    <label for="source-file" style="display: inline; margin-left: 5px;">Video File</label>
+                </div>
+            </div>
+            
+            <div id="camera-controls" class="control-group">
+                <label for="camera-device">Camera Device ID:</label>
+                <input type="number" id="camera-device" value="0" min="0" max="10">
+                <button class="button secondary" onclick="switchToCamera()">Switch to Camera</button>
+            </div>
+            
+            <div id="file-controls" class="control-group" style="display: none;">
+                <label for="video-file">Video File Path:</label>
+                <input type="text" id="video-file" value="test_video.mp4" style="width: 300px;">
+                <button class="button secondary" onclick="switchToFile()">Switch to File</button>
+            </div>
+            
+            <div class="control-group">
+                <label>Current Source:</label>
+                <span id="current-source" style="color: #4CAF50;">Camera (0)</span>
+                <span class="status-indicator status-stopped" id="status-indicator"></span>
+                <span id="ocr-status">Stopped</span>
+            </div>
+            
+            <div class="control-group">
+                <button class="button" onclick="startOCR()">Start OCR</button>
+                <button class="button danger" onclick="stopOCR()">Stop OCR</button>
+                <button class="button secondary" onclick="updatePreviews()">Update Previews</button>
+            </div>
+        </div>
+        
+        <!-- Dual Preview Section -->
+        <div class="section">
+            <h3>Live Previews</h3>
+            <div class="two-column">
+                <div class="preview-container">
+                    <h4>Crop Selection Preview</h4>
+                    <div class="crop-selector" id="crop-container">
+                        <img id="crop-preview" src="/video_frame" alt="Video Preview">
+                        <div id="crop-overlay"></div>
+                    </div>
+                    <div style="margin-top: 10px;">
+                        <button class="button secondary" onclick="clearCrop()">Clear Crop</button>
+                        <button class="button secondary" onclick="showCropDebug()">Debug Crop</button>
+                    </div>
+                    <div style="font-size: 12px; color: #aaa; margin-top: 5px;">
+                        Click and drag to select crop area
+                    </div>
+                </div>
+                
+                <div class="preview-container">
+                    <h4>Processing Pipeline Preview</h4>
+                    <img id="pipeline-preview" src="/pipeline_preview" alt="Pipeline Preview">
+                    <div style="margin-top: 10px;">
+                        <button class="button secondary" onclick="updatePipelinePreview()">Update Pipeline</button>
+                        <button class="button secondary" onclick="testOCRWithPipeline()">Test OCR</button>
+                    </div>
+                    <div class="ocr-results" id="ocr-results">
+                        OCR Result: <span id="ocr-text">No text detected</span><br>
+                        Confidence: <span id="ocr-confidence">0%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Processing Pipeline Configuration -->
+        <div class="section">
+            <h3>Processing Pipeline Configuration</h3>
+            
+            <div class="pipeline-container" id="pipeline-container">
+                <h4>Current Pipeline:</h4>
+                <div id="pipeline-steps" style="display: flex; flex-wrap: wrap; gap: 10px; min-height: 60px;">
+                    <!-- Dynamic pipeline steps will be added here -->
+                </div>
+            </div>
+            
+            <div class="pipeline-builder">
+                <h4>Processing Pipeline Builder:</h4>
+                
+                <!-- Pipeline Steps Palette -->
+                <div style="margin-bottom: 20px;">
+                    <h5>Available Steps:</h5>
+                    <div class="steps-palette" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 15px;">
+                        <button class="step-button" onclick="addPipelineStep('scale')" title="Scale image by factor">
+                            📏 Scale
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('threshold')" title="Binary threshold using Otsu">
+                            🔲 Threshold
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('threshold_inv')" title="Inverted threshold">
+                            🔳 Threshold Inv
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('blur')" title="Gaussian blur">
+                            💫 Blur
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('enhance')" title="Contrast enhancement">
+                            ✨ Enhance
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('morph_close')" title="Morphological closing">
+                            🔗 Close
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('morph_dilate')" title="Morphological dilation">
+                            ⬜ Dilate
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('flood_fill')" title="Fill edge regions">
+                            🌊 Flood Fill
+                        </button>
+                        <button class="step-button" onclick="addPipelineStep('edge_enhance')" title="Edge enhancement">
+                            🔍 Edge
+                        </button>
+                    </div>
+                    
+                    <!-- Preset Buttons -->
+                    <div style="margin-bottom: 15px;">
+                        <label>Quick Presets:</label>
+                        <button class="button secondary" onclick="loadPreset('basic')">Basic</button>
+                        <button class="button secondary" onclick="loadPreset('enhanced')">Enhanced</button>
+                        <button class="button secondary" onclick="loadPreset('robust')">Robust</button>
+                        <button class="button danger" onclick="clearPipeline()">Clear All</button>
+                    </div>
+                </div>
+                
+                <!-- Current Pipeline Actions -->
+                <div>
+                    <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
+                        <button class="button" onclick="testPipelineOCR()">🧪 Test OCR</button>
+                        <button class="button secondary" onclick="updatePipelinePreview()">🔄 Update Preview</button>
+                        <button class="button danger" onclick="clearPipeline()">Clear All</button>
+                        <span style="color: #aaa; margin-left: 10px;">
+                            Processing: Input → Pipeline → OCR (<span id="step-count">0</span> steps)
+                        </span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- OCR Engine Configuration -->
+            <div style="margin-top: 20px;">
+                <h4>OCR Engine Configuration:</h4>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                    <div class="control-group">
+                        <label for="ocr-model">Tesseract Model:</label>
+                        <select id="ocr-model">
+                            <option value="eng">English (Default)</option>
+                            <option value="ssd">Seven Segment Display (SSD)</option>
+                            <option value="ssd_plus">SSD Plus (Enhanced)</option>
+                            <option value="ssd_alphanum_plus">SSD Alphanumeric Plus</option>
+                            <option value="ssd_int">SSD Integer-only</option>
+                            <option value="7seg">Seven Segment (7seg)</option>
+                        </select>
+                        <small style="color: #aaa; display: block; margin-top: 5px;">
+                            SSD models work best for digital displays and shot clocks
+                        </small>
+                    </div>
+                    
+                    <div class="control-group">
+                        <label for="psm-mode">PSM Mode:</label>
+                        <select id="psm-mode">
+                            <option value="6">6 - Single Text Block</option>
+                            <option value="7">7 - Single Text Line</option>
+                            <option value="8">8 - Single Word</option>
+                            <option value="10">10 - Single Character</option>
+                            <option value="13">13 - Raw Line</option>
+                        </select>
+                    </div>
+                    
+                    <div class="control-group">
+                        <label for="oem-mode">OEM Mode:</label>
+                        <select id="oem-mode">
+                            <option value="0">0 - Legacy</option>
+                            <option value="1">1 - LSTM</option>
+                            <option value="2">2 - Legacy + LSTM</option>
+                            <option value="3">3 - Default</option>
+                        </select>
+                    </div>
+                    
+                    <div class="control-group">
+                        <label for="char-whitelist">Character Whitelist:</label>
+                        <input type="text" id="char-whitelist" value="0123456789">
+                    </div>
+                    
+                    <div class="control-group">
+                        <label for="confidence-threshold">Confidence Threshold:</label>
+                        <input type="number" id="confidence-threshold" value="0" min="0" max="100">
+                    </div>
+                </div>
+                
+                <div style="margin-top: 15px;">
+                    <button class="button" onclick="saveOCRConfig()">Save Configuration</button>
+                    <button class="button secondary" onclick="loadOCRConfig()">Load Current Config</button>
+                    <button class="button secondary" onclick="resetToDefaults()">Reset to Defaults</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Latest OCR Text Display -->
+        <div class="section">
+            <h3>Live OCR Output</h3>
+            <div style="background: #1a1a1a; padding: 15px; border-radius: 8px; font-family: 'Courier New', monospace;">
+                <div>Latest Text: <span id="latest-ocr-text" style="color: #4CAF50; font-weight: bold;">No text detected</span></div>
+                <div style="margin-top: 5px;">Updated: <span id="last-update">Never</span></div>
+            </div>
+        </div>
+    </div>
+    
+    
+    <script>
+        // Global variables
+        let isSelecting = false;
+        let startX, startY, endX, endY;
+        let selectionBox = null;
+        let currentPipeline = [];
+        
+        // Initialize page
+        window.addEventListener('load', function() {
+            initializeVideoSource();
+            loadOCRConfig(); // Load OCR configuration first
+            loadPipelineConfig(); // Load saved pipeline configuration
+            checkOCRStatus();
+            loadCurrentCrop();
+            updatePreviews();
+            setInterval(checkOCRStatus, 2000); // Poll every 2 seconds
+            setInterval(updatePipelinePreview, 500); // Auto-refresh pipeline preview every 0.5 seconds
+            setInterval(updateCropPreview, 2000); // Auto-refresh video frame every 2 seconds
+        });
+        
+        // Handle window resize to update crop overlay
+        window.addEventListener('resize', function() {
+            updateOverlaySize();
+            // Reload crop selection to ensure it's positioned correctly after resize
+            setTimeout(loadCurrentCrop, 100);
+        });
+        
+        // Video Source Management
+        async function initializeVideoSource() {
+            try {
+                const response = await fetch('/api/ocr/status');
+                const data = await response.json();
+                
+                const cameraRadio = document.getElementById('source-camera');
+                const fileRadio = document.getElementById('source-file');
+                const cameraDevice = document.getElementById('camera-device');
+                const videoFile = document.getElementById('video-file');
+                
+                if (data.is_file) {
+                    fileRadio.checked = true;
+                    videoFile.value = data.video_source;
+                    updateCurrentSourceDisplay(`Video File (${data.video_source})`);
+                } else {
+                    cameraRadio.checked = true;
+                    cameraDevice.value = data.video_source;
+                    updateCurrentSourceDisplay(`Camera (Device ${data.video_source})`);
+                }
+                
+                updateSourceControls();
+            } catch (error) {
+                console.error('Failed to initialize video source:', error);
+            }
+        }
+        
+        function updateSourceControls() {
+            const cameraRadio = document.getElementById('source-camera');
+            const cameraControls = document.getElementById('camera-controls');
+            const fileControls = document.getElementById('file-controls');
+            
+            if (cameraRadio.checked) {
+                cameraControls.style.display = 'block';
+                fileControls.style.display = 'none';
+            } else {
+                cameraControls.style.display = 'none';
+                fileControls.style.display = 'block';
+            }
+        }
+        
+        async function switchToCamera() {
+            try {
+                const deviceId = document.getElementById('camera-device').value;
+                console.log('Switching to camera device:', deviceId);
+                
+                const response = await fetch(`/api/ocr/set_source?type=camera&device=${deviceId}`, {
+                    method: 'GET'
+                });
+                
+                if (response.ok) {
+                    updateCurrentSourceDisplay(`Camera (Device ${deviceId})`);
+                    console.log('Successfully switched to camera');
+                    updatePreviews();
+                } else {
+                    console.error('Failed to switch to camera:', response.status, response.statusText);
+                    const text = await response.text();
+                    console.error('Error response:', text);
+                }
+            } catch (error) {
+                console.error('Error switching to camera:', error);
+            }
+        }
+        
+        async function switchToFile() {
+            try {
+                const filePath = document.getElementById('video-file').value;
+                console.log('Switching to video file:', filePath);
+                
+                const response = await fetch(`/api/ocr/set_source?type=file&path=${encodeURIComponent(filePath)}`, {
+                    method: 'GET'
+                });
+                
+                if (response.ok) {
+                    updateCurrentSourceDisplay(`Video File (${filePath})`);
+                    console.log('Successfully switched to video file');
+                    updatePreviews();
+                } else {
+                    console.error('Failed to switch to video file:', response.status, response.statusText);
+                    const text = await response.text();
+                    console.error('Error response:', text);
+                }
+            } catch (error) {
+                console.error('Error switching to video file:', error);
+            }
+        }
+        
+        function updateCurrentSourceDisplay(text) {
+            const sourceDisplay = document.getElementById('current-source');
+            if (sourceDisplay) {
+                sourceDisplay.textContent = text;
+            }
+        }
+        
+        // OCR Control Functions
+        async function startOCR() {
+            try {
+                const response = await fetch('/api/ocr/start');
+                if (response.ok) {
+                    console.log('OCR started successfully');
+                    checkOCRStatus();
+                } else {
+                    console.error('Failed to start OCR');
+                }
+            } catch (error) {
+                console.error('Error starting OCR:', error);
+            }
+        }
+        
+        async function stopOCR() {
+            try {
+                const response = await fetch('/api/ocr/stop');
+                if (response.ok) {
+                    console.log('OCR stopped successfully');
+                    checkOCRStatus();
+                } else {
+                    console.error('Failed to stop OCR');
+                }
+            } catch (error) {
+                console.error('Error stopping OCR:', error);
+            }
+        }
+        
+        async function checkOCRStatus() {
+            try {
+                const response = await fetch('/api/ocr/status');
+                const data = await response.json();
+                
+                const status = document.getElementById('ocr-status');
+                const latestText = document.getElementById('latest-ocr-text');
+                const lastUpdate = document.getElementById('last-update');
+                
+                if (status) {
+                    status.textContent = data.running ? 'Running' : 'Stopped';
+                    status.className = data.running ? 'status-running' : 'status-stopped';
+                }
+                
+                if (latestText) {
+                    latestText.textContent = data.latest_text || 'No text detected';
+                }
+                
+                if (lastUpdate) {
+                    lastUpdate.textContent = new Date().toLocaleTimeString();
+                }
+            } catch (error) {
+                console.error('Error checking OCR status:', error);
+            }
+        }
+        
+        // Preview Management
+        function updatePreviews() {
+            updateCropPreview();
+            updatePipelinePreview();
+        }
+        
+        function updateCropPreview() {
+            const preview = document.getElementById('crop-preview');
+            if (preview) {
+                const timestamp = new Date().getTime();
+                const url = `/video_frame?t=${timestamp}`;
+                
+                // Fetch the image to get original dimensions from headers
+                fetch(url, { method: 'HEAD' })
+                    .then(response => {
+                        const originalWidth = parseInt(response.headers.get('X-Original-Width')) || 640;
+                        const originalHeight = parseInt(response.headers.get('X-Original-Height')) || 480;
+                        preview.setAttribute('data-original-width', originalWidth);
+                        preview.setAttribute('data-original-height', originalHeight);
+                        console.log(`Original video dimensions: ${originalWidth}x${originalHeight}`);
+                    })
+                    .catch(e => console.log('Could not get original dimensions:', e));
+                
+                preview.src = url;
+                
+                // Update overlay size when image loads
+                preview.onload = function() {
+                    updateOverlaySize();
+                    // Reload the current crop selection to ensure it's positioned correctly
+                    loadCurrentCrop();
+                };
+            }
+        }
+        
+        function updatePipelinePreview() {
+            const preview = document.getElementById('pipeline-preview');
+            if (preview) {
+                const timestamp = new Date().getTime();
+                const config = JSON.stringify(currentPipeline);
+                preview.src = `/pipeline_preview?config=${encodeURIComponent(config)}&t=${timestamp}`;
+            }
+        }
+        
+        // Crop Selection Functions
+        function initializeCropSelection() {
+            const preview = document.getElementById('crop-preview');
+            const overlay = document.getElementById('crop-overlay');
+            
+            if (!preview || !overlay) return;
+            
+            // Prevent default drag behavior
+            preview.addEventListener('dragstart', function(e) { e.preventDefault(); });
+            preview.addEventListener('selectstart', function(e) { e.preventDefault(); });
+            
+            preview.addEventListener('mousedown', startSelection);
+            preview.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+            
+            // Update overlay size when image loads
+            preview.onload = function() {
+                updateOverlaySize();
+            };
+        }
+        
+        function updateOverlaySize() {
+            const preview = document.getElementById('crop-preview');
+            const overlay = document.getElementById('crop-overlay');
+            
+            if (preview && overlay) {
+                const rect = preview.getBoundingClientRect();
+                overlay.style.width = rect.width + 'px';
+                overlay.style.height = rect.height + 'px';
+            }
+        }
+        
+        function startSelection(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            isSelecting = true;
+            const rect = e.target.getBoundingClientRect();
+            startX = e.clientX - rect.left;
+            startY = e.clientY - rect.top;
+            
+            // Remove existing selection
+            if (selectionBox) {
+                selectionBox.remove();
+            }
+            
+            // Create new selection box
+            selectionBox = document.createElement('div');
+            selectionBox.style.position = 'absolute';
+            selectionBox.style.border = '2px solid #4CAF50';
+            selectionBox.style.backgroundColor = 'rgba(76, 175, 80, 0.2)';
+            selectionBox.style.pointerEvents = 'none';
+            selectionBox.style.left = startX + 'px';
+            selectionBox.style.top = startY + 'px';
+            selectionBox.style.width = '0px';
+            selectionBox.style.height = '0px';
+            selectionBox.style.zIndex = '1000';
+            
+            const overlay = document.getElementById('crop-overlay');
+            overlay.appendChild(selectionBox);
+            
+            // Add document-level mouse events
+            document.addEventListener('mousemove', updateSelection);
+            document.addEventListener('mouseup', endSelection);
+        }
+        
+        function updateSelection(e) {
+            if (!isSelecting || !selectionBox) return;
+            
+            e.preventDefault();
+            
+            const preview = document.getElementById('crop-preview');
+            const rect = preview.getBoundingClientRect();
+            
+            let currentX = e.clientX - rect.left;
+            let currentY = e.clientY - rect.top;
+            
+            // Constrain to image bounds
+            currentX = Math.max(0, Math.min(currentX, rect.width));
+            currentY = Math.max(0, Math.min(currentY, rect.height));
+            
+            endX = currentX;
+            endY = currentY;
+            
+            const left = Math.min(startX, endX);
+            const top = Math.min(startY, endY);
+            const width = Math.abs(endX - startX);
+            const height = Math.abs(endY - startY);
+            
+            selectionBox.style.left = left + 'px';
+            selectionBox.style.top = top + 'px';
+            selectionBox.style.width = width + 'px';
+            selectionBox.style.height = height + 'px';
+        }
+        
+        async function endSelection(e) {
+            if (!isSelecting) return;
+            
+            e.preventDefault();
+            isSelecting = false;
+            
+            // Remove document-level event listeners
+            document.removeEventListener('mousemove', updateSelection);
+            document.removeEventListener('mouseup', endSelection);
+            
+            const preview = document.getElementById('crop-preview');
+            const rect = preview.getBoundingClientRect();
+            
+            const width = Math.abs(endX - startX);
+            const height = Math.abs(endY - startY);
+            
+            if (width > 10 && height > 10) {
+                // Convert preview coordinates to actual video coordinates
+                const preview = document.getElementById('crop-preview');
+                
+                // Get original video dimensions from stored attributes (set by updateCropPreview)
+                const originalWidth = parseInt(preview.getAttribute('data-original-width')) || preview.naturalWidth || 640;
+                const originalHeight = parseInt(preview.getAttribute('data-original-height')) || preview.naturalHeight || 480;
+                
+                console.log(`Using video dimensions: ${originalWidth}x${originalHeight}`);
+                console.log(`Preview actual display size: ${preview.clientWidth}x${preview.clientHeight}`);
+                console.log(`Preview natural size: ${preview.naturalWidth}x${preview.naturalHeight}`);
+                
+                // Use the actual displayed size in the browser for scale calculation
+                // This accounts for any CSS scaling that may have occurred
+                const displayedWidth = preview.clientWidth;
+                const displayedHeight = preview.clientHeight;
+                
+                console.log(`Using displayed size: ${displayedWidth}x${displayedHeight}`);
+                
+                // Scale factors from browser-displayed image to original video
+                const scaleX = originalWidth / displayedWidth;
+                const scaleY = originalHeight / displayedHeight;
+                
+                console.log(`Scale factors: X=${scaleX}, Y=${scaleY}`);
+                
+                const left = Math.min(startX, endX);
+                const top = Math.min(startY, endY);
+                
+                const actualX = Math.round(left * scaleX);
+                const actualY = Math.round(top * scaleY);
+                const actualWidth = Math.round(width * scaleX);
+                const actualHeight = Math.round(height * scaleY);
+                
+                console.log(`Preview coords: ${left}, ${top}, ${width}x${height}`);
+                console.log(`Actual coords: ${actualX}, ${actualY}, ${actualWidth}x${actualHeight}`);
+                
+                // Send crop area to server
+                await fetch('/api/ocr/set_crop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        x: actualX,
+                        y: actualY,
+                        width: actualWidth,
+                        height: actualHeight
+                    })
+                });
+                
+                console.log(`Crop area set: ${actualX}, ${actualY}, ${actualWidth}x${actualHeight}`);
+                updatePipelinePreview(); // Update pipeline preview with new crop
+            } else {
+                // Selection too small, remove it
+                if (selectionBox) {
+                    selectionBox.remove();
+                    selectionBox = null;
+                }
+            }
+        }
+        
+        async function loadCurrentCrop() {
+            try {
+                const response = await fetch('/api/ocr/get_crop');
+                const crop = await response.json();
+                
+                if (crop.width > 0 && crop.height > 0) {
+                    // Draw existing crop area on preview
+                    const preview = document.getElementById('crop-preview');
+                    const overlay = document.getElementById('crop-overlay');
+                    
+                    if (!preview || !overlay) return;
+                    
+                    // Get original video dimensions from stored attributes
+                    const originalWidth = parseInt(preview.getAttribute('data-original-width')) || preview.naturalWidth || 640;
+                    const originalHeight = parseInt(preview.getAttribute('data-original-height')) || preview.naturalHeight || 480;
+                    
+                    // Use the actual displayed size in the browser for scale calculation
+                    const displayedWidth = preview.clientWidth;
+                    const displayedHeight = preview.clientHeight;
+                    
+                    console.log(`Loading crop - Original: ${originalWidth}x${originalHeight}, Displayed: ${displayedWidth}x${displayedHeight}`);
+                    
+                    // Convert actual coordinates to preview coordinates
+                    const scaleX = displayedWidth / originalWidth;
+                    const scaleY = displayedHeight / originalHeight;
+                    
+                    const previewX = crop.x * scaleX;
+                    const previewY = crop.y * scaleY;
+                    const previewWidth = crop.width * scaleX;
+                    const previewHeight = crop.height * scaleY;
+                    
+                    console.log(`Loading crop: actual(${crop.x}, ${crop.y}, ${crop.width}x${crop.height}) -> preview(${previewX}, ${previewY}, ${previewWidth}x${previewHeight})`);
+                    console.log(`Scale factors: X=${scaleX}, Y=${scaleY}`);
+                    
+                    if (selectionBox) {
+                        selectionBox.remove();
+                    }
+                    
+                    selectionBox = document.createElement('div');
+                    selectionBox.style.position = 'absolute';
+                    selectionBox.style.border = '2px solid #4CAF50';
+                    selectionBox.style.backgroundColor = 'rgba(76, 175, 80, 0.2)';
+                    selectionBox.style.pointerEvents = 'none';
+                    selectionBox.style.left = previewX + 'px';
+                    selectionBox.style.top = previewY + 'px';
+                    selectionBox.style.width = previewWidth + 'px';
+                    selectionBox.style.height = previewHeight + 'px';
+                    selectionBox.style.zIndex = '1000';
+                    
+                    overlay.appendChild(selectionBox);
+                }
+            } catch (error) {
+                console.error('Error loading crop area:', error);
+            }
+        }
+        
+        async function clearCrop() {
+            try {
+                await fetch('/api/ocr/clear_crop');
+                if (selectionBox) {
+                    selectionBox.remove();
+                    selectionBox = null;
+                }
+                console.log('Crop area cleared');
+                updatePipelinePreview();
+            } catch (error) {
+                console.error('Error clearing crop:', error);
+            }
+        }
+        
+        async function showCropDebug() {
+            try {
+                const preview = document.getElementById('crop-preview');
+                const originalWidth = parseInt(preview.getAttribute('data-original-width')) || preview.naturalWidth || 640;
+                const originalHeight = parseInt(preview.getAttribute('data-original-height')) || preview.naturalHeight || 480;
+                
+                const response = await fetch('/api/ocr/get_crop');
+                const crop = await response.json();
+                
+                const debugInfo = `Crop Debug Information:
+
+Original Video Dimensions: ${originalWidth} x ${originalHeight}
+Preview Image Natural Size: ${preview.naturalWidth} x ${preview.naturalHeight}
+Preview Image Displayed Size: ${preview.clientWidth} x ${preview.clientHeight}
+Preview Image CSS Size: ${preview.style.width} x ${preview.style.height}
+
+Current Crop Area (in original video coordinates):
+X: ${crop.x}
+Y: ${crop.y}
+Width: ${crop.width}
+Height: ${crop.height}
+
+Scale Factors:
+X Scale: ${originalWidth / preview.clientWidth}
+Y Scale: ${originalHeight / preview.clientHeight}
+
+If crop selection doesn't match the right area:
+1. Make sure video is loaded before selecting
+2. Try refreshing the page
+3. Check browser console for detailed logs`;
+
+                alert(debugInfo);
+                console.log('=== CROP DEBUG ===');
+                console.log('Original dimensions:', originalWidth, 'x', originalHeight);
+                console.log('Preview natural size:', preview.naturalWidth, 'x', preview.naturalHeight);
+                console.log('Preview displayed size:', preview.clientWidth, 'x', preview.clientHeight);
+                console.log('Current crop:', crop);
+                console.log('Scale factors:', originalWidth / preview.clientWidth, originalHeight / preview.clientHeight);
+                console.log('=================');
+            } catch (error) {
+                console.error('Error getting crop debug info:', error);
+                alert('Error getting crop debug information: ' + error.message);
+            }
+        }
+        
+        // Pipeline Management
+        function addPipelineStep(type) {
+            const step = { type: type, params: {} };
+            
+            // Set default parameters based on type
+            switch (type) {
+                case 'scale':
+                    step.params.factor = 6;
+                    break;
+                case 'blur':
+                    step.params.kernel = 3;
+                    break;
+                case 'threshold':
+                case 'threshold_inv':
+                    step.params.threshold = 0; // 0 means auto (OTSU)
+                    break;
+                case 'enhance':
+                    step.params.clip_limit = 3.0;
+                    step.params.tile_size = 8;
+                    break;
+                case 'morph_close':
+                    step.params.kernel_size = 2;
+                    break;
+                case 'morph_dilate':
+                    step.params.kernel_width = 3;
+                    step.params.kernel_height = 1;
+                    step.params.iterations = 1;
+                    break;
+                case 'edge_enhance':
+                    step.params.blur_kernel = 3;
+                    step.params.weight = 1.5;
+                    break;
+                // flood_fill has no parameters
+            }
+            
+            currentPipeline.push(step);
+            updatePipelineDisplay();
+            updatePipelinePreview();
+            savePipelineConfig(); // Auto-save when step added
+        }
+        
+        function clearPipeline() {
+            currentPipeline = [];
+            updatePipelineDisplay();
+            updatePipelinePreview();
+            savePipelineConfig(); // Auto-save when pipeline cleared
+        }
+        
+        function removePipelineStep(index) {
+            if (confirm('Are you sure you want to delete this pipeline step?')) {
+                currentPipeline.splice(index, 1);
+                updatePipelineDisplay();
+                updatePipelinePreview();
+                savePipelineConfig(); // Auto-save when step removed
+            }
+        }
+        
+        function updatePipelineDisplay() {
+            const container = document.getElementById('pipeline-steps');
+            const pipelineContainer = document.getElementById('pipeline-container');
+            const stepCount = document.getElementById('step-count');
+            
+            if (!container) return;
+            
+            stepCount.textContent = currentPipeline.length;
+            
+            if (currentPipeline.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #666; padding: 20px; width: 100%;">Click "Add" buttons above to build your processing pipeline<br><small>Steps process in order from left to right</small></div>';
+                return;
+            }
+            
+            container.innerHTML = '';
+            
+            currentPipeline.forEach((step, index) => {
+                const stepDiv = document.createElement('div');
+                stepDiv.className = 'pipeline-step';
+                stepDiv.draggable = true;
+                stepDiv.setAttribute('data-index', index);
+                stepDiv.style.cursor = 'move';
+                stepDiv.style.position = 'relative';
+                
+                // Add drag event listeners
+                stepDiv.addEventListener('dragstart', handleDragStart);
+                stepDiv.addEventListener('dragover', handleDragOver);
+                stepDiv.addEventListener('drop', handleDrop);
+                stepDiv.addEventListener('dragend', handleDragEnd);
+                
+                const stepName = getStepDisplayName(step.type);
+                const paramsDisplay = getParamsDisplay(step);
+                
+                stepDiv.innerHTML = `
+                    <div class="step-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span class="step-name">${stepName}</span>
+                        <button onclick="removePipelineStep(${index})" class="remove-btn" style="background: #d32f2f; color: white; border: none; border-radius: 3px; width: 20px; height: 20px; cursor: pointer; font-size: 12px;">×</button>
+                    </div>
+                    <div class="step-params">
+                        ${paramsDisplay}
+                    </div>
+                `;
+                container.appendChild(stepDiv);
+            });
+        }
+        
+        function getStepDisplayName(type) {
+            const names = {
+                'scale': '📏 Scale',
+                'threshold': '🔲 Threshold',
+                'threshold_inv': '🔳 Threshold Inv',
+                'blur': '💫 Blur',
+                'enhance': '✨ Enhance',
+                'morph_close': '🔗 Close',
+                'morph_dilate': '⬜ Dilate',
+                'flood_fill': '🌊 Flood Fill',
+                'edge_enhance': '🔍 Edge Enhance'
+            };
+            return names[type] || type;
+        }
+        
+        function getParamsDisplay(step) {
+            const type = step.type;
+            const params = step.params || {};
+            let html = '';
+            
+            switch (type) {
+                case 'scale':
+                    html = `<label>Factor: <input type="number" value="${params.factor || 6}" min="1" max="12" step="0.5" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'factor', this.value)" style="width: 60px; margin-left: 5px;"></label>`;
+                    break;
+                case 'blur':
+                    html = `<label>Kernel: <input type="number" value="${params.kernel || 3}" min="1" max="15" step="2" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'kernel', this.value)" style="width: 60px; margin-left: 5px;"></label>`;
+                    break;
+                case 'threshold':
+                case 'threshold_inv':
+                    html = `<label>Threshold: <input type="number" value="${params.threshold || 0}" min="0" max="255" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'threshold', this.value)" style="width: 60px; margin-left: 5px;"> <small>(0=auto)</small></label>`;
+                    break;
+                case 'enhance':
+                    html = `
+                        <div style="font-size: 12px;">
+                            <label>Clip: <input type="number" value="${params.clip_limit || 3.0}" min="1" max="10" step="0.5" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'clip_limit', this.value)" style="width: 50px;"></label>
+                            <label>Tile: <input type="number" value="${params.tile_size || 8}" min="4" max="16" step="2" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'tile_size', this.value)" style="width: 50px;"></label>
+                        </div>
+                    `;
+                    break;
+                case 'morph_close':
+                    html = `<label>Kernel: <input type="number" value="${params.kernel_size || 2}" min="1" max="10" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'kernel_size', this.value)" style="width: 50px; margin-left: 5px;"></label>`;
+                    break;
+                case 'morph_dilate':
+                    html = `
+                        <div style="font-size: 12px;">
+                            <label>W: <input type="number" value="${params.kernel_width || 3}" min="1" max="10" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'kernel_width', this.value)" style="width: 40px;"></label>
+                            <label>H: <input type="number" value="${params.kernel_height || 1}" min="1" max="10" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'kernel_height', this.value)" style="width: 40px;"></label>
+                            <label>Iter: <input type="number" value="${params.iterations || 1}" min="1" max="5" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'iterations', this.value)" style="width: 40px;"></label>
+                        </div>
+                    `;
+                    break;
+                case 'edge_enhance':
+                    html = `
+                        <div style="font-size: 12px;">
+                            <label>Blur: <input type="number" value="${params.blur_kernel || 3}" min="3" max="15" step="2" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'blur_kernel', this.value)" style="width: 50px;"></label>
+                            <label>Weight: <input type="number" value="${params.weight || 1.5}" min="1" max="3" step="0.1" onchange="updateStepParam(${currentPipeline.indexOf(step)}, 'weight', this.value)" style="width: 50px;"></label>
+                        </div>
+                    `;
+                    break;
+                default:
+                    html = '<small style="color: #999;">No parameters</small>';
+            }
+            
+            return html;
+        }
+        
+        function updateStepParam(stepIndex, paramName, value) {
+            if (stepIndex >= 0 && stepIndex < currentPipeline.length) {
+                if (!currentPipeline[stepIndex].params) {
+                    currentPipeline[stepIndex].params = {};
+                }
+                currentPipeline[stepIndex].params[paramName] = parseFloat(value) || 0;
+                updatePipelinePreview();
+                savePipelineConfig(); // Auto-save when pipeline changes
+            }
+        }
+        
+        function savePipelineConfig() {
+            // Save the current pipeline configuration to the backend
+            fetch('/update_pipeline_config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    pipeline: currentPipeline
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    console.log('Pipeline configuration saved');
+                } else {
+                    console.error('Failed to save pipeline configuration:', data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error saving pipeline configuration:', error);
+            });
+        }
+        
+        function loadPipelineConfig() {
+            // Load the saved pipeline configuration from the backend
+            fetch('/get_ocr_config')
+                .then(response => response.json())
+                .then(config => {
+                    if (config.pipeline && Array.isArray(config.pipeline)) {
+                        currentPipeline = config.pipeline;
+                        updatePipelineDisplay();
+                        updatePipelinePreview();
+                        console.log('Pipeline configuration loaded:', currentPipeline);
+                    } else {
+                        console.log('No saved pipeline found, using default');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading pipeline configuration:', error);
+                    console.log('Using default pipeline configuration');
+                });
+        }
+        
+        // Drag and Drop functionality
+        let draggedElement = null;
+        let draggedIndex = null;
+        
+        function handleDragStart(e) {
+            draggedElement = this;
+            draggedIndex = parseInt(this.getAttribute('data-index'));
+            this.style.opacity = '0.5';
+            
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/html', this.outerHTML);
+        }
+        
+        function handleDragOver(e) {
+            if (e.preventDefault) {
+                e.preventDefault();
+            }
+            
+            e.dataTransfer.dropEffect = 'move';
+            
+            const afterElement = getDragAfterElement(e.currentTarget.parentElement, e.clientY);
+            const dragZone = e.currentTarget.parentElement;
+            
+            if (afterElement == null) {
+                dragZone.appendChild(draggedElement);
+            } else {
+                dragZone.insertBefore(draggedElement, afterElement);
+            }
+            
+            return false;
+        }
+        
+        function handleDrop(e) {
+            if (e.stopPropagation) {
+                e.stopPropagation();
+            }
+            
+            const dropIndex = parseInt(this.getAttribute('data-index'));
+            
+            if (draggedIndex !== null && draggedIndex !== dropIndex) {
+                // Move the pipeline step
+                const step = currentPipeline.splice(draggedIndex, 1)[0];
+                const newIndex = draggedIndex < dropIndex ? dropIndex - 1 : dropIndex;
+                currentPipeline.splice(newIndex, 0, step);
+                
+                updatePipelineDisplay();
+                updatePipelinePreview();
+                savePipelineConfig(); // Auto-save when steps reordered
+            }
+            
+            return false;
+        }
+        
+        function handleDragEnd(e) {
+            this.style.opacity = '';
+            draggedElement = null;
+            draggedIndex = null;
+        }
+        
+        function getDragAfterElement(container, y) {
+            const draggableElements = [...container.querySelectorAll('.pipeline-step:not(.dragging)')];
+            
+            return draggableElements.reduce((closest, child) => {
+                const box = child.getBoundingClientRect();
+                const offset = y - box.top - box.height / 2;
+                
+                if (offset < 0 && offset > closest.offset) {
+                    return { offset: offset, element: child };
+                } else {
+                    return closest;
+                }
+            }, { offset: Number.NEGATIVE_INFINITY }).element;
+        }
+        
+        async function testPipelineOCR() {
+            try {
+                const config = JSON.stringify(currentPipeline);
+                const response = await fetch(`/test_pipeline_ocr?config=${encodeURIComponent(config)}`);
+                const result = await response.json();
+                
+                console.log('OCR Result:', result.text);
+                alert(`OCR Result: "${result.text}"`);
+            } catch (error) {
+                console.error('Error testing OCR:', error);
+            }
+        }
+        
+        // Initialize crop selection when crop preview loads
+        setTimeout(() => {
+            initializeCropSelection();
+            updatePipelineDisplay(); // Initialize pipeline display
+        }, 1000);
+        
+        // Load OCR config on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initialize with default pipeline if empty
+            if (currentPipeline.length === 0) {
+                currentPipeline = [
+                    { type: 'scale', params: { factor: 6 } },
+                    { type: 'threshold', params: { threshold: 0 } }
+                ];
+            }
+            
+            loadOCRConfig();
+            updatePipelineDisplay();
+            updatePipelinePreview();
+        });
+        
+        // OCR Configuration functions
+        async function saveOCRConfig() {
+            const config = {
+                model: document.getElementById('ocr-model').value,
+                psm: document.getElementById('psm-mode').value,
+                oem: document.getElementById('oem-mode').value,
+                whitelist: document.getElementById('char-whitelist').value,
+                confidence: document.getElementById('confidence-threshold').value
+            };
+            
+            try {
+                const response = await fetch('/api/ocr/set_config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                
+                if (response.ok) {
+                    console.log('OCR config saved successfully');
+                    alert('OCR configuration saved!');
+                } else {
+                    console.error('Failed to save OCR config');
+                    alert('Failed to save OCR configuration');
+                }
+            } catch (error) {
+                console.error('Error saving OCR config:', error);
+                alert('Error saving OCR configuration');
+            }
+        }
+        
+        async function loadOCRConfig() {
+            try {
+                const response = await fetch('/api/ocr/get_config');
+                const config = await response.json();
+                
+                document.getElementById('ocr-model').value = config.model || 'eng';
+                document.getElementById('psm-mode').value = config.psm || '6';
+                document.getElementById('oem-mode').value = config.oem || '3';
+                document.getElementById('char-whitelist').value = config.whitelist || '0123456789';
+                document.getElementById('confidence-threshold').value = config.confidence || '0';
+                
+                console.log('OCR config loaded successfully');
+            } catch (error) {
+                console.error('Error loading OCR config:', error);
+            }
+        }
+        
+        function resetToDefaults() {
+            document.getElementById('ocr-model').value = 'ssd';
+            document.getElementById('psm-mode').value = '8';
+            document.getElementById('oem-mode').value = '1';
+            document.getElementById('char-whitelist').value = '0123456789';
+            document.getElementById('confidence-threshold').value = '0';
+            
+            // Reset pipeline to defaults
+            currentPipeline = [
+                { type: 'scale', params: { factor: 6 } },
+                { type: 'threshold', params: {} }
+            ];
+            updatePipelineDisplay();
+            updatePipelinePreview();
+        }
+    </script>
+</body>
+</html>
