@@ -11,8 +11,8 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <iomanip>
 #include "shared-schedule.h"
-
 #ifdef _WIN32
 #include <windows.h>
 #include <gdiplus.h>
@@ -27,6 +27,18 @@ using namespace Gdiplus;
 #endif
 
 #include <QtCore/QSettings>
+
+// Forward declaration of scoreboard structure
+struct scoreboard_source {
+	std::string home_team;
+	std::string away_team;
+	std::string home_logo_path;
+	std::string away_logo_path;
+	std::string config_dir;
+};
+
+// External function to get global scoreboard
+extern struct scoreboard_source *get_global_scoreboard();
 
 // Get saved config directory from control panel settings
 std::string get_saved_config_dir_roster() {
@@ -50,11 +62,6 @@ struct RosterData {
 	uint32_t away_bg;
 	uint32_t away_text;
 };
-
-// Global schedule data reference (from schedule source)
-extern struct GlobalScheduleData *g_schedule_data;
-extern void init_global_schedule_data();
-extern void update_global_schedule_data(const std::string& config_dir);
 
 // Convert hex string to color value
 uint32_t hex_to_color_roster(const std::string& hex) {
@@ -83,6 +90,16 @@ RosterData load_roster(const std::string& team_name, const std::string& config_d
 	roster.home_text = 0xFFFFFFFF;
 	roster.away_bg = 0xFFFF8000;
 	roster.away_text = 0xFFFFFFFF;
+	
+	// Check if team name is still a placeholder (can't load roster for unresolved teams)
+	if (team_name.find("Winner Game ") != std::string::npos || 
+	    team_name.find("Loser Game ") != std::string::npos ||
+	    team_name.find(" vs ") != std::string::npos ||
+	    team_name.find("Winner: ") != std::string::npos ||
+	    team_name.find("Loser: ") != std::string::npos) {
+		blog(LOG_INFO, "[Roster] Skipping roster load for unresolved team: %s", team_name.c_str());
+		return roster;
+	}
 	
 	// Get team colors from global schedule data
 	if (g_schedule_data && g_schedule_data->teams.find(team_name) != g_schedule_data->teams.end()) {
@@ -168,6 +185,18 @@ CurrentGame get_current_game() {
 	CurrentGame game;
 	game.found = false;
 	
+	// First, check if we have a game selected in the scoreboard (via control panel)
+	struct scoreboard_source *scoreboard = get_global_scoreboard();
+	if (scoreboard && !scoreboard->home_team.empty() && !scoreboard->away_team.empty()) {
+		game.home_team = scoreboard->home_team;
+		game.away_team = scoreboard->away_team;
+		game.found = true;
+		blog(LOG_INFO, "[Roster] Using scoreboard game: %s vs %s", 
+		     game.home_team.c_str(), game.away_team.c_str());
+		return game;
+	}
+	
+	// Fallback: use schedule to find next game
 	if (!g_schedule_data || g_schedule_data->schedule.empty()) {
 		return game;
 	}
@@ -177,11 +206,14 @@ CurrentGame get_current_game() {
 	// Find the next upcoming game or current game
 	for (const auto& sched_game : g_schedule_data->schedule) {
 		if (sched_game.start_time >= now) {
-			game.home_team = sched_game.home_team;
-			game.away_team = sched_game.away_team;
+			// Resolve placeholders to actual team names (without display prefix)
+			game.home_team = resolve_team_placeholder(sched_game.home_team, false);
+			game.away_team = resolve_team_placeholder(sched_game.away_team, false);
 			game.date = sched_game.date;
 			game.time = sched_game.time;
 			game.found = true;
+			blog(LOG_INFO, "[Roster] Current game resolved from schedule: %s vs %s", 
+			     game.home_team.c_str(), game.away_team.c_str());
 			break;
 		}
 	}
@@ -189,11 +221,14 @@ CurrentGame get_current_game() {
 	// If no future game found, use the last game
 	if (!game.found && !g_schedule_data->schedule.empty()) {
 		const auto& sched_game = g_schedule_data->schedule.back();
-		game.home_team = sched_game.home_team;
-		game.away_team = sched_game.away_team;
+		// Resolve placeholders to actual team names (without display prefix)
+		game.home_team = resolve_team_placeholder(sched_game.home_team, false);
+		game.away_team = resolve_team_placeholder(sched_game.away_team, false);
 		game.date = sched_game.date;
 		game.time = sched_game.time;
 		game.found = true;
+		blog(LOG_INFO, "[Roster] Last game resolved from schedule: %s vs %s", 
+		     game.home_team.c_str(), game.away_team.c_str());
 	}
 	
 	return game;
@@ -209,8 +244,9 @@ struct roster_source_context {
 	
 	// Settings
 	std::string config_dir;
-	std::string team_mode; // "home", "away", or specific team name
+	std::string team_mode; // "home", "away", "both", or specific team name
 	std::string specific_team; // If team_mode is a specific team
+	bool show_both_teams; // Show home and away side by side
 	
 	// Visual settings
 	uint32_t background_color;
@@ -220,7 +256,13 @@ struct roster_source_context {
 	
 	// Data
 	RosterData current_roster;
+	RosterData away_roster; // For dual display mode
 	std::chrono::system_clock::time_point last_update;
+	
+	// Scrolling
+	float scroll_offset;
+	std::chrono::steady_clock::time_point last_scroll_time;
+	float scroll_speed; // pixels per second
 	
 #ifdef _WIN32
 	// GDI+ resources
@@ -229,14 +271,15 @@ struct roster_source_context {
 #endif
 	
 	roster_source_context() : source(nullptr), width(1920), height(1080),
-		team_mode("home"), specific_team(""),
+		team_mode("home"), specific_team(""), show_both_teams(false),
 		background_color(0x001A1A1A), text_color(0xFFFFFFFF), accent_color(0xFF0080FF),
-		font_size(36)
+		font_size(36), scroll_offset(0.0f), scroll_speed(50.0f)
 #ifdef _WIN32
 		, graphics(nullptr), render_target(nullptr)
 #endif
 	{
 		last_update = (std::chrono::system_clock::time_point::min)();
+		last_scroll_time = std::chrono::steady_clock::now();
 	}
 };
 
@@ -267,6 +310,156 @@ void add_rounded_rectangle_roster(GraphicsPath* path, float x, float y, float wi
 	path->CloseFigure();
 }
 
+// Helper function to render a single team's roster
+void render_single_team_roster(Graphics* graphics, const RosterData& roster, const std::string& config_dir,
+								float x, float y, float width, float height, float scroll_offset, 
+								int font_size, bool is_home) {
+	FontFamily fontFamily(L"Segoe UI");
+	
+	// Determine colors
+	uint32_t bg_color = is_home ? roster.home_bg : roster.away_bg;
+	uint32_t txt_color = is_home ? roster.home_text : roster.away_text;
+	
+	Color teamColor1(200, (bg_color >> 16) & 0xFF, (bg_color >> 8) & 0xFF, bg_color & 0xFF);
+	Color teamColor2(100, (bg_color >> 16) & 0xFF, (bg_color >> 8) & 0xFF, bg_color & 0xFF);
+	Color teamTextColor((txt_color >> 24) & 0xFF, (txt_color >> 16) & 0xFF, (txt_color >> 8) & 0xFF, txt_color & 0xFF);
+	SolidBrush teamTextBrush(teamTextColor);
+	
+	float titleHeight = 80.0f;
+	float margin = 15.0f;
+	
+	// Title
+	std::wstring title = std::wstring(roster.team_name.begin(), roster.team_name.end());
+	RectF titleRect(x, y, width, titleHeight);
+	
+	GraphicsPath titlePath;
+	add_rounded_rectangle_roster(&titlePath, titleRect.X, titleRect.Y, titleRect.Width, titleRect.Height, 12.0f);
+	
+	LinearGradientBrush titleGradient(
+		PointF(titleRect.X, titleRect.Y),
+		PointF(titleRect.X, titleRect.Y + titleRect.Height),
+		teamColor1,
+		teamColor2
+	);
+	
+	graphics->FillPath(&titleGradient, &titlePath);
+	
+	// Load and draw team logo
+	Image* teamLogo = nullptr;
+	if (g_schedule_data && g_schedule_data->teams.find(roster.team_name) != g_schedule_data->teams.end()) {
+		const auto& team = g_schedule_data->teams.at(roster.team_name);
+		std::string base_logo_path = team.logo_path;
+		
+		std::vector<std::string> paths_to_try;
+		std::string png_path = base_logo_path;
+		if (png_path.length() >= 4 && png_path.substr(png_path.length() - 4) == ".svg") {
+			png_path = png_path.substr(0, png_path.length() - 4) + ".png";
+		}
+		
+		if (!config_dir.empty()) {
+			paths_to_try.push_back(config_dir + "/" + base_logo_path);
+			paths_to_try.push_back(config_dir + "/" + png_path);
+		} else {
+			paths_to_try.push_back("config/" + base_logo_path);
+			paths_to_try.push_back("config/" + png_path);
+		}
+		
+		for (const auto& full_path : paths_to_try) {
+			int size_needed = MultiByteToWideChar(CP_UTF8, 0, full_path.c_str(), -1, NULL, 0);
+			std::wstring wide_path(size_needed, 0);
+			MultiByteToWideChar(CP_UTF8, 0, full_path.c_str(), -1, &wide_path[0], size_needed);
+			
+			teamLogo = Image::FromFile(wide_path.c_str());
+			if (teamLogo && teamLogo->GetLastStatus() == Ok) {
+				break;
+			} else {
+				if (teamLogo) {
+					delete teamLogo;
+					teamLogo = nullptr;
+				}
+			}
+		}
+	}
+	
+	float logoSize = titleHeight - 20.0f;
+	if (teamLogo) {
+		graphics->DrawImage(teamLogo, x + 10.0f, y + 10.0f, logoSize, logoSize);
+		delete teamLogo;
+	}
+	
+	StringFormat centerFormat;
+	centerFormat.SetAlignment(StringAlignmentCenter);
+	centerFormat.SetLineAlignment(StringAlignmentCenter);
+	
+	Gdiplus::Font titleFont(&fontFamily, (REAL)(font_size * 1.4), FontStyleBold, UnitPixel);
+	graphics->DrawString(title.c_str(), -1, &titleFont, titleRect, &centerFormat, &teamTextBrush);
+	
+	// Players list
+	float contentStartY = y + titleHeight + 10.0f;
+	float visibleHeight = height - titleHeight - 10.0f;
+	float playerRowHeight = 120.0f;
+	float playerSpacing = 15.0f;
+	
+	if (!roster.players.empty()) {
+		// Set up clipping
+		Region clipRegion(RectF(x, contentStartY, width, visibleHeight));
+		graphics->SetClip(&clipRegion);
+		
+		int playerIndex = 0;
+		for (const auto& player : roster.players) {
+			float playerY = contentStartY + playerIndex * (playerRowHeight + playerSpacing) - scroll_offset;
+			
+			if (playerY + playerRowHeight >= contentStartY - playerRowHeight && playerY <= y + height + playerRowHeight) {
+				// Narrower card
+				float cardWidth = width - 2 * margin;
+				RectF playerRect(x + margin, playerY, cardWidth, playerRowHeight);
+				
+				GraphicsPath playerPath;
+				add_rounded_rectangle_roster(&playerPath, playerRect.X, playerRect.Y, playerRect.Width, playerRect.Height, 12.0f);
+				
+				LinearGradientBrush playerGradient(
+					PointF(playerRect.X, playerRect.Y),
+					PointF(playerRect.X + playerRect.Width, playerRect.Y),
+					teamColor2,
+					teamColor1
+				);
+				
+				graphics->FillPath(&playerGradient, &playerPath);
+				
+				Pen borderPen(Color(150, 255, 255, 255), 2.0f);
+				graphics->DrawPath(&borderPen, &playerPath);
+				
+				// Cap number
+				float capWidth = 100.0f;
+				RectF capRect(playerRect.X + 15, playerRect.Y, capWidth, playerRowHeight);
+				std::wstring capStr = std::wstring(player.cap_number.begin(), player.cap_number.end());
+				
+				Gdiplus::Font capFontLarge(&fontFamily, (REAL)(font_size * 2.2), FontStyleBold, UnitPixel);
+				StringFormat capFormat;
+				capFormat.SetAlignment(StringAlignmentCenter);
+				capFormat.SetLineAlignment(StringAlignmentCenter);
+				graphics->DrawString(capStr.c_str(), -1, &capFontLarge, capRect, &capFormat, &teamTextBrush);
+				
+				// Player name (left-aligned, narrower)
+				RectF nameRect(playerRect.X + capWidth + 20, playerRect.Y + 10, cardWidth - capWidth - 35, playerRowHeight - 20);
+				std::wstring nameStr = std::wstring(player.first_name.begin(), player.first_name.end()) + L" " +
+									   std::wstring(player.last_name.begin(), player.last_name.end());
+				
+				Gdiplus::Font nameFontLarge(&fontFamily, (REAL)(font_size * 1.6), FontStyleBold, UnitPixel);
+				StringFormat nameFormat;
+				nameFormat.SetAlignment(StringAlignmentNear);
+				nameFormat.SetLineAlignment(StringAlignmentCenter);
+				nameFormat.SetTrimming(StringTrimmingEllipsisCharacter);
+				graphics->DrawString(nameStr.c_str(), -1, &nameFontLarge, nameRect, &nameFormat, &teamTextBrush);
+			}
+			
+			playerIndex++;
+		}
+		
+		graphics->ResetClip();
+	}
+}
+
 // Render roster display
 void render_roster(roster_source_context *context) {
 	if (!context->graphics) return;
@@ -283,136 +476,69 @@ void render_roster(roster_source_context *context) {
 	context->graphics->SetSmoothingMode(SmoothingModeAntiAlias);
 	context->graphics->SetTextRenderingHint(TextRenderingHintAntiAlias);
 	
-	// Fonts
-	FontFamily fontFamily(L"Segoe UI");
-	Gdiplus::Font titleFont(&fontFamily, (REAL)(context->font_size * 1.8), FontStyleBold, UnitPixel);
-	Gdiplus::Font playerFont(&fontFamily, (REAL)(context->font_size * 0.9), FontStyleRegular, UnitPixel);
-	Gdiplus::Font capFont(&fontFamily, (REAL)(context->font_size * 1.2), FontStyleBold, UnitPixel);
+	// Update scroll offset
+	auto now = std::chrono::steady_clock::now();
+	float delta_time = std::chrono::duration<float>(now - context->last_scroll_time).count();
+	context->last_scroll_time = now;
 	
-	// Colors
-	SolidBrush textBrush(Color(
-		(context->text_color >> 24) & 0xFF,
-		(context->text_color >> 16) & 0xFF,
-		(context->text_color >> 8) & 0xFF,
-		context->text_color & 0xFF
-	));
-	
-	// Determine which colors to use (home or away)
-	uint32_t bg_color = context->current_roster.home_bg;
-	uint32_t txt_color = context->current_roster.home_text;
-	
-	if (context->team_mode == "away") {
-		bg_color = context->current_roster.away_bg;
-		txt_color = context->current_roster.away_text;
-	}
-	
-	Color teamColor1(200, (bg_color >> 16) & 0xFF, (bg_color >> 8) & 0xFF, bg_color & 0xFF);
-	Color teamColor2(100, (bg_color >> 16) & 0xFF, (bg_color >> 8) & 0xFF, bg_color & 0xFF);
-	Color teamTextColor((txt_color >> 24) & 0xFF, (txt_color >> 16) & 0xFF, (txt_color >> 8) & 0xFF, txt_color & 0xFF);
-	
-	SolidBrush teamTextBrush(teamTextColor);
-	
-	// Layout
 	float margin = 30.0f;
-	float titleHeight = 100.0f;
-	float playerHeight = 60.0f;
 	
-	// Title
-	std::wstring title = L"Roster - " + std::wstring(context->current_roster.team_name.begin(), 
-													  context->current_roster.team_name.end());
-	RectF titleRect(margin, margin, (REAL)(context->width - 2 * margin), titleHeight);
-	
-	GraphicsPath titlePath;
-	add_rounded_rectangle_roster(&titlePath, titleRect.X, titleRect.Y, titleRect.Width, titleRect.Height, 15.0f);
-	
-	LinearGradientBrush titleGradient(
-		PointF(titleRect.X, titleRect.Y),
-		PointF(titleRect.X, titleRect.Y + titleRect.Height),
-		teamColor1,
-		teamColor2
-	);
-	
-	context->graphics->FillPath(&titleGradient, &titlePath);
-	
-	StringFormat centerFormat;
-	centerFormat.SetAlignment(StringAlignmentCenter);
-	centerFormat.SetLineAlignment(StringAlignmentCenter);
-	
-	context->graphics->DrawString(title.c_str(), -1, &titleFont, titleRect, &centerFormat, &teamTextBrush);
-	
-	// Players grid
-	float currentY = margin + titleHeight + 20.0f;
-	float availableHeight = context->height - currentY - margin;
-	
-	// Calculate columns - fit as many as possible
-	int columns = 2;
-	float columnWidth = (context->width - 2 * margin - (columns - 1) * 15.0f) / columns;
-	
-	if (context->current_roster.players.empty()) {
-		std::wstring noPlayers = L"No roster data available";
-		RectF messageRect(margin, currentY, (REAL)(context->width - 2 * margin), playerHeight);
-		context->graphics->DrawString(noPlayers.c_str(), -1, &playerFont, messageRect, &centerFormat, &textBrush);
-	} else {
-		int playerIndex = 0;
-		int row = 0;
+	if (context->show_both_teams) {
+		// Dual display mode - show home and away side by side
+		float columnWidth = (context->width - 3 * margin) / 2.0f;
+		float contentHeight = context->height - 2 * margin;
 		
-		for (const auto& player : context->current_roster.players) {
-			int col = playerIndex % columns;
-			row = playerIndex / columns;
-			
-			float x = margin + col * (columnWidth + 15.0f);
-			float y = currentY + row * (playerHeight + 10.0f);
-			
-			// Check if we're out of vertical space
-			if (y + playerHeight > context->height - margin) {
-				break;
+		// Calculate scroll based on the longer roster
+		size_t max_players = std::max(context->current_roster.players.size(), context->away_roster.players.size());
+		float playerRowHeight = 120.0f;
+		float playerSpacing = 15.0f;
+		float totalContentHeight = max_players * (playerRowHeight + playerSpacing);
+		float visibleHeight = contentHeight - 90.0f; // Subtract title height
+		
+		if (totalContentHeight > visibleHeight) {
+			context->scroll_offset += context->scroll_speed * delta_time;
+			float maxScroll = totalContentHeight + visibleHeight * 0.5f;
+			if (context->scroll_offset > maxScroll) {
+				context->scroll_offset = -visibleHeight * 0.5f;
 			}
-			
-			// Player card
-			RectF playerRect(x, y, columnWidth, playerHeight);
-			
-			GraphicsPath playerPath;
-			add_rounded_rectangle_roster(&playerPath, playerRect.X, playerRect.Y, playerRect.Width, playerRect.Height, 8.0f);
-			
-			// Card background with team color
-			LinearGradientBrush playerGradient(
-				PointF(playerRect.X, playerRect.Y),
-				PointF(playerRect.X + playerRect.Width, playerRect.Y),
-				teamColor2,
-				teamColor1
-			);
-			
-			context->graphics->FillPath(&playerGradient, &playerPath);
-			
-			// Border
-			Pen borderPen(Color(100, 255, 255, 255), 1.5f);
-			context->graphics->DrawPath(&borderPen, &playerPath);
-			
-			// Cap number on left side
-			float capWidth = 80.0f;
-			RectF capRect(x + 10, y, capWidth, playerHeight);
-			std::wstring capStr = std::wstring(player.cap_number.begin(), player.cap_number.end());
-			
-			StringFormat capFormat;
-			capFormat.SetAlignment(StringAlignmentCenter);
-			capFormat.SetLineAlignment(StringAlignmentCenter);
-			
-			context->graphics->DrawString(capStr.c_str(), -1, &capFont, capRect, &capFormat, &teamTextBrush);
-			
-			// Player name on right side
-			RectF nameRect(x + capWidth + 10, y + 10, columnWidth - capWidth - 20, playerHeight - 20);
-			std::wstring nameStr = std::wstring(player.first_name.begin(), player.first_name.end()) + L" " +
-								   std::wstring(player.last_name.begin(), player.last_name.end());
-			
-			StringFormat nameFormat;
-			nameFormat.SetAlignment(StringAlignmentNear);
-			nameFormat.SetLineAlignment(StringAlignmentCenter);
-			nameFormat.SetTrimming(StringTrimmingEllipsisCharacter);
-			
-			context->graphics->DrawString(nameStr.c_str(), -1, &playerFont, nameRect, &nameFormat, &teamTextBrush);
-			
-			playerIndex++;
+		} else {
+			context->scroll_offset = 0.0f;
 		}
+		
+		// Render home team (left side)
+		render_single_team_roster(context->graphics, context->current_roster, context->config_dir,
+								   margin, margin, columnWidth, contentHeight, context->scroll_offset,
+								   context->font_size, true);
+		
+		// Render away team (right side)
+		render_single_team_roster(context->graphics, context->away_roster, context->config_dir,
+								   margin * 2 + columnWidth, margin, columnWidth, contentHeight, context->scroll_offset,
+								   context->font_size, false);
+	} else {
+		// Single team display mode
+		float contentWidth = context->width - 2 * margin;
+		float contentHeight = context->height - 2 * margin;
+		
+		bool is_home = (context->team_mode != "away");
+		
+		float playerRowHeight = 120.0f;
+		float playerSpacing = 15.0f;
+		float totalContentHeight = context->current_roster.players.size() * (playerRowHeight + playerSpacing);
+		float visibleHeight = contentHeight - 90.0f;
+		
+		if (totalContentHeight > visibleHeight) {
+			context->scroll_offset += context->scroll_speed * delta_time;
+			float maxScroll = totalContentHeight + visibleHeight * 0.5f;
+			if (context->scroll_offset > maxScroll) {
+				context->scroll_offset = -visibleHeight * 0.5f;
+			}
+		} else {
+			context->scroll_offset = 0.0f;
+		}
+		
+		render_single_team_roster(context->graphics, context->current_roster, context->config_dir,
+								   margin, margin, contentWidth, contentHeight, context->scroll_offset,
+								   context->font_size, is_home);
 	}
 }
 #endif
@@ -487,6 +613,9 @@ static void roster_source_update(void *data, obs_data_t *settings)
 	const char *team_mode = obs_data_get_string(settings, "team_mode");
 	context->team_mode = team_mode ? team_mode : "home";
 	
+	// Check if showing both teams
+	context->show_both_teams = (context->team_mode == "both");
+	
 	// Get specific team if applicable
 	const char *specific_team = obs_data_get_string(settings, "specific_team");
 	context->specific_team = specific_team ? specific_team : "";
@@ -497,27 +626,45 @@ static void roster_source_update(void *data, obs_data_t *settings)
 	context->accent_color = (uint32_t)obs_data_get_int(settings, "accent_color");
 	context->font_size = (int)obs_data_get_int(settings, "font_size");
 	
-	// Determine which team to display
-	std::string team_to_display;
-	
-	if (context->team_mode == "specific" && !context->specific_team.empty()) {
-		team_to_display = context->specific_team;
-	} else {
+	if (context->show_both_teams) {
+		// Load both home and away rosters
 		CurrentGame game = get_current_game();
 		if (game.found) {
-			team_to_display = (context->team_mode == "away") ? game.away_team : game.home_team;
+			if (game.home_team != context->current_roster.team_name) {
+				context->current_roster = load_roster(game.home_team, context->config_dir);
+			}
+			if (game.away_team != context->away_roster.team_name) {
+				context->away_roster = load_roster(game.away_team, context->config_dir);
+			}
+			context->last_update = std::chrono::system_clock::now();
+			
+			blog(LOG_INFO, "[Roster] Both teams mode - Home: %s (%zu players), Away: %s (%zu players)", 
+				 context->current_roster.team_name.c_str(), context->current_roster.players.size(),
+				 context->away_roster.team_name.c_str(), context->away_roster.players.size());
 		}
+	} else {
+		// Determine which team to display
+		std::string team_to_display;
+		
+		if (context->team_mode == "specific" && !context->specific_team.empty()) {
+			team_to_display = context->specific_team;
+		} else {
+			CurrentGame game = get_current_game();
+			if (game.found) {
+				team_to_display = (context->team_mode == "away") ? game.away_team : game.home_team;
+			}
+		}
+		
+		// Load roster if team changed
+		if (!team_to_display.empty() && team_to_display != context->current_roster.team_name) {
+			context->current_roster = load_roster(team_to_display, context->config_dir);
+			context->last_update = std::chrono::system_clock::now();
+		}
+		
+		blog(LOG_INFO, "[Roster] Settings updated - Mode: %s, Team: %s, Players: %zu", 
+			 context->team_mode.c_str(), context->current_roster.team_name.c_str(), 
+			 context->current_roster.players.size());
 	}
-	
-	// Load roster if team changed
-	if (!team_to_display.empty() && team_to_display != context->current_roster.team_name) {
-		context->current_roster = load_roster(team_to_display, context->config_dir);
-		context->last_update = std::chrono::system_clock::now();
-	}
-	
-	blog(LOG_INFO, "[Roster] Settings updated - Mode: %s, Team: %s, Players: %zu", 
-		 context->team_mode.c_str(), context->current_roster.team_name.c_str(), 
-		 context->current_roster.players.size());
 }
 
 static obs_properties_t *roster_source_get_properties(void *data)
@@ -535,6 +682,7 @@ static obs_properties_t *roster_source_get_properties(void *data)
 		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(mode_list, "Home Team (from current game)", "home");
 	obs_property_list_add_string(mode_list, "Away Team (from current game)", "away");
+	obs_property_list_add_string(mode_list, "Both Teams (side by side)", "both");
 	obs_property_list_add_string(mode_list, "Specific Team", "specific");
 	
 	// Specific team selection (only shown when mode is "specific")
@@ -583,8 +731,8 @@ static void roster_source_render(void *data, gs_effect_t *effect)
 	auto now = std::chrono::system_clock::now();
 	auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - context->last_update).count();
 	
-	// Update every 60 seconds to check for game changes
-	if (elapsed >= 60 && (context->team_mode == "home" || context->team_mode == "away")) {
+	// Update every 5 seconds to check for game changes
+	if (elapsed >= 5 && (context->team_mode == "home" || context->team_mode == "away")) {
 		CurrentGame game = get_current_game();
 		if (game.found) {
 			std::string team_to_display = (context->team_mode == "away") ? game.away_team : game.home_team;
@@ -593,6 +741,24 @@ static void roster_source_render(void *data, gs_effect_t *effect)
 				context->last_update = now;
 				blog(LOG_INFO, "[Roster] Auto-updated to %s team: %s", 
 					 context->team_mode.c_str(), team_to_display.c_str());
+			}
+		}
+	}
+	
+	// Also check for both teams mode
+	if (elapsed >= 5 && context->show_both_teams) {
+		CurrentGame game = get_current_game();
+		if (game.found) {
+			if (game.home_team != context->current_roster.team_name && !game.home_team.empty()) {
+				context->current_roster = load_roster(game.home_team, context->config_dir);
+			}
+			if (game.away_team != context->away_roster.team_name && !game.away_team.empty()) {
+				context->away_roster = load_roster(game.away_team, context->config_dir);
+			}
+			if (game.home_team != context->current_roster.team_name || game.away_team != context->away_roster.team_name) {
+				context->last_update = now;
+				blog(LOG_INFO, "[Roster] Auto-updated both teams: %s vs %s", 
+					 game.home_team.c_str(), game.away_team.c_str());
 			}
 		}
 	}

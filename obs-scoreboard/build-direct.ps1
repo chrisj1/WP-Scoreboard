@@ -4,7 +4,7 @@
 param(
     [string]$QtPath = "C:\Qt\6.8.3\msvc2022_64",
     [string]$ObsSourcePath = "$env:USERPROFILE\Downloads\obs-studio-32.0.1",
-    [string]$LibTorchPath = "C:\libtorch-cpu",
+    [string]$LibTorchPath = "C:\libtorch",
     [switch]$Clean
 )
 
@@ -143,7 +143,6 @@ if (-not (Test-Path "CMakeCache.txt") -or $Clean) {
         Write-Host ""
         Write-Host "❌ CMake configuration failed!" -ForegroundColor Red
         Set-Location ..
-        Read-Host "Press Enter to exit"
         exit 1
     }
 } else {

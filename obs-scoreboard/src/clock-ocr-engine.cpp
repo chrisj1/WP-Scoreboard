@@ -565,11 +565,11 @@ void BayesianGameClockFilter::resetPrior() {
 
 ShotClockCNN::ShotClockCNN() 
     : model_loaded(false), device(torch::kCPU) {
-    if (torch::cuda::is_available()) {
-        device = torch::Device(torch::kCUDA);
-        blog(LOG_INFO, "Shot Clock CNN: CUDA available, using GPU");
-    } else {
-        blog(LOG_INFO, "Shot Clock CNN: Using CPU");
+    // Wrap device initialization to catch any errors
+    try {
+        blog(LOG_INFO, "Shot Clock CNN: Initializing with CPU device");
+    } catch (const std::exception& e) {
+        blog(LOG_ERROR, "Shot Clock CNN: Failed to initialize device: %s", e.what());
     }
 }
 
@@ -578,13 +578,22 @@ ShotClockCNN::~ShotClockCNN() {
 
 bool ShotClockCNN::loadModel(const std::string& model_path) {
     try {
+        // Force single-threaded mode to prevent crashes
+        torch::set_num_threads(1);
+        torch::set_num_interop_threads(1);
+        
+        blog(LOG_INFO, "Shot Clock CNN: Loading model from %s", model_path.c_str());
         model = torch::jit::load(model_path, device);
         model.eval();
         model_loaded = true;
-        blog(LOG_INFO, "Shot Clock CNN: Model loaded from %s", model_path.c_str());
+        blog(LOG_INFO, "Shot Clock CNN: Model loaded successfully");
         return true;
     } catch (const c10::Error& e) {
         blog(LOG_ERROR, "Shot Clock CNN: Failed to load model: %s", e.what());
+        model_loaded = false;
+        return false;
+    } catch (const std::exception& e) {
+        blog(LOG_ERROR, "Shot Clock CNN: Failed to load model (std::exception): %s", e.what());
         model_loaded = false;
         return false;
     }
@@ -733,11 +742,11 @@ ClockPrediction ShotClockCNN::predict(const cv::Mat& roi_image) {
 
 GameClockCNN::GameClockCNN()
     : model_loaded(false), device(torch::kCPU) {
-    if (torch::cuda::is_available()) {
-        device = torch::Device(torch::kCUDA);
-        blog(LOG_INFO, "Game Clock CNN: CUDA available, using GPU");
-    } else {
-        blog(LOG_INFO, "Game Clock CNN: Using CPU");
+    // Wrap device initialization to catch any errors
+    try {
+        blog(LOG_INFO, "Game Clock CNN: Initializing with CPU device");
+    } catch (const std::exception& e) {
+        blog(LOG_ERROR, "Game Clock CNN: Failed to initialize device: %s", e.what());
     }
 }
 
@@ -746,13 +755,22 @@ GameClockCNN::~GameClockCNN() {
 
 bool GameClockCNN::loadModel(const std::string& model_path) {
     try {
+        // Force single-threaded mode to prevent crashes
+        torch::set_num_threads(1);
+        torch::set_num_interop_threads(1);
+        
+        blog(LOG_INFO, "Game Clock CNN: Loading model from %s", model_path.c_str());
         model = torch::jit::load(model_path, device);
         model.eval();
         model_loaded = true;
-        blog(LOG_INFO, "Game Clock CNN: Model loaded from %s", model_path.c_str());
+        blog(LOG_INFO, "Game Clock CNN: Model loaded successfully");
         return true;
     } catch (const c10::Error& e) {
         blog(LOG_ERROR, "Game Clock CNN: Failed to load model: %s", e.what());
+        model_loaded = false;
+        return false;
+    } catch (const std::exception& e) {
+        blog(LOG_ERROR, "Game Clock CNN: Failed to load model (std::exception): %s", e.what());
         model_loaded = false;
         return false;
     }
@@ -917,8 +935,10 @@ ClockOCREngine::ClockOCREngine()
       last_shot_clock_confidence(0.0f), last_game_clock_confidence(0.0f),
       max_buffered_frames(5) {
     
-    shot_clock_cnn = std::make_unique<ShotClockCNN>();
-    game_clock_cnn = std::make_unique<GameClockCNN>();
+    // Don't create CNN objects here to avoid PyTorch initialization during plugin load
+    // They will be created when models are loaded
+    blog(LOG_INFO, "ClockOCREngine: Constructor (CNNs will be initialized on model load)");
+    
     // Default to averaging over 5 consecutive frames for smoother results
     shot_clock_filter = std::make_unique<BayesianShotClockFilter>(fps, 5);
     game_clock_filter = std::make_unique<BayesianGameClockFilter>(fps, 5);
@@ -929,10 +949,20 @@ ClockOCREngine::~ClockOCREngine() {
 }
 
 bool ClockOCREngine::loadShotClockModel(const std::string& model_path) {
+    // Create CNN object lazily on first model load
+    if (!shot_clock_cnn) {
+        blog(LOG_INFO, "ClockOCREngine: Creating ShotClockCNN instance");
+        shot_clock_cnn = std::make_unique<ShotClockCNN>();
+    }
     return shot_clock_cnn->loadModel(model_path);
 }
 
 bool ClockOCREngine::loadGameClockModel(const std::string& model_path) {
+    // Create CNN object lazily on first model load
+    if (!game_clock_cnn) {
+        blog(LOG_INFO, "ClockOCREngine: Creating GameClockCNN instance");
+        game_clock_cnn = std::make_unique<GameClockCNN>();
+    }
     return game_clock_cnn->loadModel(model_path);
 }
 

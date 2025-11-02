@@ -103,8 +103,13 @@ bool obs_module_load(void)
 	
 	// Initialize control panel GUI
 	blog(LOG_INFO, "[Diagnostics] Initializing control panel...");
-	init_control_panel();
-	blog(LOG_INFO, "[Diagnostics] Control panel initialized");
+	try {
+		init_control_panel();
+		blog(LOG_INFO, "[Diagnostics] Control panel initialized");
+	} catch (const std::exception& e) {
+		blog(LOG_ERROR, "[Diagnostics] Control panel initialization failed: %s", e.what());
+		blog(LOG_WARNING, "Plugin will continue without control panel");
+	}
 	
 	blog(LOG_INFO, "========================================");
 	blog(LOG_INFO, "Water Polo Scoreboard Plugin LOADED SUCCESSFULLY");

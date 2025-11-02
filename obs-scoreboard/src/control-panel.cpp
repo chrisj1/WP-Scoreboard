@@ -440,6 +440,10 @@ public:
 		scoresLayout->addWidget(awayScorePlusBtn, 1, 2);
 		scoresLayout->addWidget(awayScoreMinusBtn, 1, 3);
 		
+		// Add save score button
+		QPushButton *saveScoreBtn = new QPushButton("Save Score to Schedule");
+		scoresLayout->addWidget(saveScoreBtn, 2, 0, 1, 4);
+		
 		scoresGroup->setLayout(scoresLayout);
 		mainLayout->addWidget(scoresGroup);
 		
@@ -599,6 +603,8 @@ public:
 			awayScoreSpin->setValue(awayScoreSpin->value() - 1);
 			updateScoreboard();
 		});
+		
+		connect(saveScoreBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::saveScoreToSchedule);
 		
 		connect(startGameClockBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::startGameClock);
 		connect(stopGameClockBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::stopGameClock);
@@ -944,6 +950,15 @@ private slots:
 				QString time = parts[0].trimmed();
 				QString home = parts[1].trimmed();
 				QString away = parts[2].trimmed();
+				
+				// Resolve placeholder team names to actual teams
+				std::string home_std = home.toUtf8().constData();
+				std::string away_std = away.toUtf8().constData();
+				home_std = resolve_team_placeholder(home_std, false);
+				away_std = resolve_team_placeholder(away_std, false);
+				home = QString::fromStdString(home_std);
+				away = QString::fromStdString(away_std);
+				
 				QString displayText = QString("%1: %2 vs %3").arg(time, home, away);
 				
 				gameSelectCombo->addItem(displayText);
@@ -1096,6 +1111,169 @@ private slots:
 			awayManupTimer->stop();
 		}
 		updateScoreboard();
+	}
+	
+	void saveScoreToSchedule() {
+		if (configDir.isEmpty()) {
+			QMessageBox::warning(this, "No Schedule Loaded", 
+				"Please load a schedule directory first.");
+			return;
+		}
+		
+		QString homeTeam = homeTeamEdit->text().trimmed();
+		QString awayTeam = awayTeamEdit->text().trimmed();
+		int homeScore = homeScoreSpin->value();
+		int awayScore = awayScoreSpin->value();
+		
+		if (homeTeam.isEmpty() || awayTeam.isEmpty()) {
+			QMessageBox::warning(this, "Missing Team Names", 
+				"Both home and away team names must be set.");
+			return;
+		}
+		
+		// Determine winner
+		QString winner;
+		if (homeScore > awayScore) {
+			winner = homeTeam;
+		} else if (awayScore > homeScore) {
+			winner = awayTeam;
+		} else {
+			// Tie - prompt for winner
+			QStringList options;
+			options << homeTeam << awayTeam << "Tie";
+			
+			bool ok;
+			QString selection = QInputDialog::getItem(this, "Game Tied", 
+				QString("The score is tied %1-%2. Select the winner (or Tie):").arg(homeScore).arg(awayScore),
+				options, 0, false, &ok);
+			
+			if (!ok) {
+				return; // User cancelled
+			}
+			
+			winner = selection;
+		}
+		
+		// Read the schedule.csv file
+		QString schedulePath = configDir + "/schedule.csv";
+		QFile inputFile(schedulePath);
+		if (!inputFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+			QMessageBox::critical(this, "Error", 
+				QString("Could not open schedule file: %1").arg(schedulePath));
+			return;
+		}
+		
+		QStringList lines;
+		QTextStream in(&inputFile);
+		QString header = in.readLine();
+		
+		// Check if we need to add the score and winner columns
+		QStringList headerParts = header.split(',');
+		bool hasScoreColumns = headerParts.contains("home_score");
+		
+		if (!hasScoreColumns) {
+			header += ",home_score,away_score,winner";
+		}
+		lines.append(header);
+		
+		bool foundGame = false;
+		
+		// Process each line - only update scores, don't change team names
+		while (!in.atEnd()) {
+			QString line = in.readLine();
+			QStringList parts = line.split(',');
+			
+			if (parts.size() >= 3) {
+				QString lineHome = parts[1].trimmed();
+				QString lineAway = parts[2].trimmed();
+				
+				// Check if this is the current game
+				if (lineHome == homeTeam && lineAway == awayTeam) {
+					foundGame = true;
+					
+					// Build the updated line with scores only
+					QString updatedLine;
+					if (hasScoreColumns && parts.size() >= 6) {
+						// Update existing score columns
+						parts[3] = QString::number(homeScore);
+						parts[4] = QString::number(awayScore);
+						parts[5] = winner;
+						updatedLine = parts.join(',');
+					} else {
+						// Add score columns
+						updatedLine = QString("%1,%2,%3").arg(line).arg(homeScore).arg(awayScore);
+						updatedLine += "," + winner;
+					}
+					lines.append(updatedLine);
+					
+					blog(LOG_INFO, "[SaveScore] Updated game: %s vs %s = %d-%d (Winner: %s)",
+						homeTeam.toUtf8().constData(), awayTeam.toUtf8().constData(),
+						homeScore, awayScore, winner.toUtf8().constData());
+				} else {
+					// Keep the line as is, but add empty columns if needed
+					if (!hasScoreColumns) {
+						line += ",,,"; // Empty score and winner columns
+					}
+					lines.append(line);
+				}
+			} else {
+				lines.append(line);
+			}
+		}
+		
+		inputFile.close();
+		
+		if (!foundGame) {
+			QMessageBox::warning(this, "Game Not Found", 
+				QString("Could not find game '%1 vs %2' in schedule.").arg(homeTeam, awayTeam));
+			return;
+		}
+		
+		// Write back to the file (truncate to overwrite completely)
+		QFile outputFile(schedulePath);
+		if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+			QMessageBox::critical(this, "Error", 
+				QString("Could not write to schedule file: %1").arg(schedulePath));
+			return;
+		}
+		
+		QTextStream out(&outputFile);
+		for (const QString &line : lines) {
+			out << line << "\n";
+		}
+		
+		outputFile.close();
+		
+		// Reload the global schedule data so the schedule view updates
+		if (!configDir.isEmpty()) {
+			blog(LOG_INFO, "[SaveScore] Calling update_global_schedule_data with dir: %s", 
+				configDir.toUtf8().constData());
+			update_global_schedule_data(configDir.toStdString());
+			blog(LOG_INFO, "[SaveScore] Global schedule data reloaded, timestamp updated");
+			
+			// Force all schedule sources to refresh by triggering their update
+			int source_count = 0;
+			obs_enum_sources([](void* param, obs_source_t* source) {
+				int* count = (int*)param;
+				const char* id = obs_source_get_id(source);
+				if (id && strcmp(id, "water_polo_schedule") == 0) {
+					(*count)++;
+					blog(LOG_INFO, "[SaveScore] Found schedule source, forcing refresh");
+					// Get current settings and trigger update
+					obs_data_t* settings = obs_source_get_settings(source);
+					obs_source_update(source, settings);
+					obs_data_release(settings);
+				}
+				return true;
+			}, &source_count);
+			blog(LOG_INFO, "[SaveScore] Refreshed %d schedule sources", source_count);
+		}
+		
+		QMessageBox::information(this, "Score Saved", 
+			QString("Score saved successfully:\n%1 %2 - %3 %4\nWinner: %5")
+				.arg(homeTeam).arg(homeScore).arg(awayScore).arg(awayTeam).arg(winner));
+		
+		blog(LOG_INFO, "[SaveScore] Score saved to schedule.csv successfully");
 	}
 	
 	void browseShotClockModel() {

@@ -1,15 +1,25 @@
-start_time,home,away
-2025-09-20 13:00,RPI,Syracuse
-2025-09-20 13:50,Cornell,NYU
-2025-09-20 14:40,Army,Columbia
-2025-09-20 15:30,RPI,Coast Guard
-2025-09-20 16:20,NYU,Syracuse
-2025-09-20 17:10,Cornell,Columbia
-2025-09-20 18:00,Army,Coast Guard
-2025-09-21 12:30,Columbia,NYU
-2025-09-21 13:20,Coast Guard,Syracuse
-2025-09-21 14:10,Army,Cornell
-2025-09-21 15:00,RPI,NYU
-2025-09-21 15:50,Columbia,Syracuse
-2025-09-21 16:40,Cornell,Coast Guard
-2025-09-21 17:30,RPI,Army
+start_time,home,away,home_score,away_score,winner
+2025-09-20 13:00,RPI,Syracuse,,,
+2025-09-20 13:50,Cornell,NYU,,,
+2025-09-20 14:40,Army,Columbia,,,
+2025-09-20 15:30,RPI,Coast Guard,2,0,RPI
+2025-09-20 16:20,NYU,Syracuse,2,0,NYU
+2025-09-20 17:10,Cornell,Columbia,,,
+2025-09-20 18:00,Army,Coast Guard,,,
+2025-09-21 12:30,Columbia,NYU,,,
+2025-09-21 13:20,Coast Guard,Syracuse,,,
+2025-09-21 14:10,Army,Cornell,,,
+2025-09-21 15:00,RPI,NYU,,,
+2025-09-21 15:50,Columbia,Syracuse,,,
+2025-09-21 16:40,Cornell,Coast Guard,,,
+2025-09-21 17:30,RPI,Army,,,
+2025-10-25 13:00,Cornell,Army,2,0,Cornell
+2025-10-25 13:50,NYU,Syracuse,2,0,NYU
+2025-10-25 14:40,Columbia,RPI,2,0,Columbia
+2025-10-25 15:30,Coast Guard,Army,2,0,Coast Guard
+2025-10-25 16:20,Loser Game 17,Loser Game 16,,,
+2025-10-26 12:30,Winner Game 17,Winner Game 16,,,
+2025-10-26 13:40,Coast Guard,Loser Game 16,,,
+2025-10-26 14:50,Loser Game 21,Army,,,
+2025-10-26 16:00,Coast Guard,Loser Game 17,,,
+2025-10-26 17:10,Winner Game 21,Cornell,,,

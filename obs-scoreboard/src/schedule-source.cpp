@@ -39,25 +39,6 @@ std::string get_saved_config_dir() {
 	return configDir.toUtf8().constData();
 }
 
-// Forward declarations and structures
-struct Team {
-	std::string code;
-	std::string name;
-	std::string logo_path;
-	uint32_t home_bg;
-	uint32_t home_text;
-	uint32_t away_bg;
-	uint32_t away_text;
-};
-
-struct Game {
-	std::string date;
-	std::string time;
-	std::string home_team;
-	std::string away_team;
-	std::chrono::system_clock::time_point start_time;
-};
-
 // Helper function for parsing datetime strings
 std::chrono::system_clock::time_point parse_datetime(const std::string& datetime_str) {
 	std::tm tm = {};
@@ -69,22 +50,19 @@ std::chrono::system_clock::time_point parse_datetime(const std::string& datetime
 		return std::chrono::system_clock::now();
 	}
 	
+	// Set DST flag to -1 to let mktime determine DST automatically
+	// but we'll force it to not apply DST by setting tm_isdst to 0
+	tm.tm_isdst = 0;
+	
 	return std::chrono::system_clock::from_time_t(std::mktime(&tm));
 }
 
 // Global schedule data (shared between control panel and schedule source)
-struct GlobalScheduleData {
-	std::vector<Game> schedule;
-	std::map<std::string, Team> teams;
-	std::string config_dir;
-	std::chrono::system_clock::time_point last_update;
-	
-	GlobalScheduleData() {
-		last_update = std::chrono::system_clock::now();
-	}
-};
+GlobalScheduleData::GlobalScheduleData() {
+	last_update = std::chrono::system_clock::now();
+}
 
-static GlobalScheduleData *g_schedule_data = nullptr;
+GlobalScheduleData *g_schedule_data = nullptr;
 
 // Initialize global schedule data
 void init_global_schedule_data() {
@@ -237,8 +215,11 @@ void update_global_schedule_data(const std::string& config_dir) {
 	
 	std::string line;
 	bool first_line = true;
+	int line_num = 0;
 	
 	while (std::getline(file, line)) {
+		line_num++;
+		
 		if (first_line) {
 			first_line = false;
 			continue; // Skip header
@@ -246,12 +227,31 @@ void update_global_schedule_data(const std::string& config_dir) {
 		
 		if (line.empty()) continue;
 		
-		std::stringstream ss(line);
-		std::string start_time_str, home, away;
+		// Proper CSV parsing - handle commas inside quotes and multiple columns
+		std::vector<std::string> fields;
+		std::string field;
+		bool in_quotes = false;
 		
-		if (std::getline(ss, start_time_str, ',') &&
-			std::getline(ss, home, ',') &&
-			std::getline(ss, away)) {
+		for (size_t i = 0; i < line.size(); i++) {
+			char c = line[i];
+			
+			if (c == '"') {
+				in_quotes = !in_quotes;
+			} else if (c == ',' && !in_quotes) {
+				fields.push_back(field);
+				field.clear();
+			} else {
+				field += c;
+			}
+		}
+		fields.push_back(field); // Add last field
+		
+		// We need at least 3 fields: start_time, home, away
+		// Additional fields (home_score, away_score, winner) are optional
+		if (fields.size() >= 3) {
+			std::string start_time_str = fields[0];
+			std::string home = fields[1];
+			std::string away = fields[2];
 			
 			Game game;
 			game.start_time = parse_datetime(start_time_str);
@@ -391,6 +391,149 @@ std::vector<std::string> get_schedule_dates() {
 
 // Update active days based on preferences
 // Get games for a specific date
+// Resolve placeholder team names like "Winner Game 17" or "Loser Game 17" to display format
+// If game has been played: returns just the team name (e.g., "RPI")
+// If game hasn't been played yet: returns "Winner: Home vs Away" or "Loser: Home vs Away"
+// If for_display=false: always returns just the team name (for roster loading)
+std::string resolve_team_placeholder(const std::string& team_name, bool for_display) {
+	if (!g_schedule_data) return team_name;
+	
+	// Check if this is a placeholder
+	if (team_name.find("Winner Game ") == 0 || team_name.find("Loser Game ") == 0) {
+		bool is_winner = (team_name.find("Winner") == 0);
+		std::string prefix = is_winner ? "Winner" : "Loser";
+		
+		// Extract game number
+		size_t pos = team_name.find("Game ") + 5;
+		int game_num = std::stoi(team_name.substr(pos));
+		
+		blog(LOG_INFO, "[Resolve] Attempting to resolve %s (game %d)", team_name.c_str(), game_num);
+		
+		// Find that game in the schedule (game numbers are 1-indexed)
+		if (game_num > 0 && game_num <= (int)g_schedule_data->schedule.size()) {
+			const auto& ref_game = g_schedule_data->schedule[game_num - 1];
+			
+			// Check if that game has been played (has scores in CSV)
+			// We need to re-read the CSV to get score info since Game struct doesn't store it
+			std::string config_path = g_schedule_data->config_dir + "/schedule.csv";
+			std::ifstream file(config_path);
+			if (file.is_open()) {
+				std::string line;
+				bool first_line = true;
+				int current_game = 0;
+				
+				while (std::getline(file, line)) {
+					if (first_line) {
+						first_line = false;
+						continue;
+					}
+					if (line.empty()) continue;
+					
+					current_game++;
+					if (current_game == game_num) {
+						// Parse this game's winner from CSV
+						std::vector<std::string> fields;
+						std::string field;
+						bool in_quotes = false;
+						
+						for (size_t i = 0; i < line.size(); i++) {
+							char c = line[i];
+							if (c == '"') {
+								in_quotes = !in_quotes;
+							} else if (c == ',' && !in_quotes) {
+								fields.push_back(field);
+								field.clear();
+							} else {
+								field += c;
+							}
+						}
+						fields.push_back(field);
+						
+						if (fields.size() >= 6 && !fields[5].empty()) {
+							// Game has been played - return just the team name
+							std::string winner = fields[5];
+							std::string home = fields[1];
+							std::string away = fields[2];
+							std::string loser = (winner == home) ? away : home;
+							std::string team = is_winner ? winner : loser;
+							
+							blog(LOG_INFO, "[Resolve] Resolved %s -> %s (game completed)", team_name.c_str(), team.c_str());
+							return team;
+						} else {
+							// Game hasn't been played yet
+							if (for_display) {
+								// Show "Winner: Home vs Away" or "Loser: Home vs Away"
+								// But first resolve home and away in case they are also placeholders
+								std::string home = fields[1];
+								std::string away = fields[2];
+								
+								blog(LOG_INFO, "[Resolve] Game %d not played yet, home='%s' away='%s'", 
+								     game_num, home.c_str(), away.c_str());
+								
+								// Recursively resolve placeholders in home and away
+								home = resolve_team_placeholder(home, false);
+								away = resolve_team_placeholder(away, false);
+								
+								blog(LOG_INFO, "[Resolve] After recursive resolution: home='%s' away='%s'", 
+								     home.c_str(), away.c_str());
+								
+								// Check if both teams are actual teams (not placeholders)
+								// If so, just show "Team1 vs Team2" without the Winner/Loser prefix
+								bool home_is_placeholder = (home.find("Winner Game ") == 0 || home.find("Loser Game ") == 0);
+								bool away_is_placeholder = (away.find("Winner Game ") == 0 || away.find("Loser Game ") == 0);
+								
+								if (!home_is_placeholder && !away_is_placeholder) {
+									// Both resolved to actual teams, no need for Winner/Loser prefix
+									std::string result = home + " vs " + away;
+									blog(LOG_INFO, "[Resolve] Both teams resolved, showing: %s", result.c_str());
+									return result;
+								} else {
+									// At least one is still a placeholder, show with prefix
+									std::string result = prefix + ": " + home + " vs " + away;
+									blog(LOG_INFO, "[Resolve] Game not played yet, showing: %s", result.c_str());
+									return result;
+								}
+							} else {
+								// For roster/scoreboard: try to resolve even if game not played
+								// Return the actual team from the referenced game
+								std::string home = fields[1];
+								std::string away = fields[2];
+								
+								// Recursively resolve home and away
+								home = resolve_team_placeholder(home, false);
+								away = resolve_team_placeholder(away, false);
+								
+								// Check if both are actual teams (not still placeholders)
+								bool home_is_placeholder = (home.find("Winner Game ") == 0 || home.find("Loser Game ") == 0);
+								bool away_is_placeholder = (away.find("Winner Game ") == 0 || away.find("Loser Game ") == 0);
+								
+								if (!home_is_placeholder && !away_is_placeholder) {
+									// Both teams are known, pick the appropriate one
+									// For "Winner" we don't know yet, but for roster purposes
+									// we could default to home team or return empty
+									blog(LOG_INFO, "[Resolve] Game %d not played, both teams known: %s vs %s", 
+									     game_num, home.c_str(), away.c_str());
+									// For roster loading, we can't determine winner/loser yet
+									// Return placeholder to indicate roster not available yet
+									return team_name;
+								} else {
+									// At least one team still unknown
+									blog(LOG_INFO, "[Resolve] Game %d teams not fully resolved yet", game_num);
+									return team_name;
+								}
+							}
+						}
+						break;
+					}
+				}
+				file.close();
+			}
+		}
+	}
+	
+	return team_name; // Return as-is if not a placeholder or can't resolve
+}
+
 std::vector<Game> get_games_for_day(const std::string& date_str) {
 	std::vector<Game> day_games;
 	
@@ -398,7 +541,11 @@ std::vector<Game> get_games_for_day(const std::string& date_str) {
 	
 	for (const auto& game : g_schedule_data->schedule) {
 		if (game.date == date_str) {
-			day_games.push_back(game);
+			// Resolve placeholder team names for display
+			Game display_game = game;
+			display_game.home_team = resolve_team_placeholder(game.home_team);
+			display_game.away_team = resolve_team_placeholder(game.away_team);
+			day_games.push_back(display_game);
 		}
 	}
 	
@@ -702,7 +849,41 @@ void render_day_schedule(schedule_source_context *context, const std::string& da
 			leftFormat.SetLineAlignment(StringAlignmentCenter);
 			leftFormat.SetTrimming(StringTrimmingEllipsisCharacter);
 			SolidBrush homeTextBrush(homeTextColor);
-			context->graphics->DrawString(homeTeam.c_str(), -1, &gameFont, homeTextRect, &leftFormat, &homeTextBrush);
+			
+			// Check if team name starts with "Winner:" or "Loser:" (unresolved placeholder)
+			std::string homeStr = game.home_team;
+			bool homeIsUnresolved = (homeStr.find("Winner:") == 0 || homeStr.find("Loser:") == 0);
+			
+			if (homeIsUnresolved) {
+				// Unresolved placeholder - split into two lines with smaller font
+				size_t colonPos = homeStr.find(':');
+				std::string prefix = homeStr.substr(0, colonPos);
+				std::string matchup = homeStr.substr(colonPos + 2); // Skip ": "
+				
+				// Use smaller font for two-line display
+				Gdiplus::Font smallerFont(L"Segoe UI", 22, FontStyleBold, UnitPixel);
+				
+				// Draw prefix on first line
+				std::wstring prefixW = std::wstring(prefix.begin(), prefix.end());
+				RectF line1Rect(homeTextRect.X, homeTextRect.Y, homeTextRect.Width, homeTextRect.Height / 2);
+				StringFormat topFormat;
+				topFormat.SetAlignment(StringAlignmentNear);
+				topFormat.SetLineAlignment(StringAlignmentFar);
+				topFormat.SetTrimming(StringTrimmingEllipsisCharacter);
+				context->graphics->DrawString(prefixW.c_str(), -1, &smallerFont, line1Rect, &topFormat, &homeTextBrush);
+				
+				// Draw matchup on second line
+				std::wstring matchupW = std::wstring(matchup.begin(), matchup.end());
+				RectF line2Rect(homeTextRect.X, homeTextRect.Y + homeTextRect.Height / 2, homeTextRect.Width, homeTextRect.Height / 2);
+				StringFormat bottomFormat;
+				bottomFormat.SetAlignment(StringAlignmentNear);
+				bottomFormat.SetLineAlignment(StringAlignmentNear);
+				bottomFormat.SetTrimming(StringTrimmingEllipsisCharacter);
+				context->graphics->DrawString(matchupW.c_str(), -1, &smallerFont, line2Rect, &bottomFormat, &homeTextBrush);
+			} else {
+				// Regular team name or resolved placeholder - single line, normal font
+				context->graphics->DrawString(homeTeam.c_str(), -1, &gameFont, homeTextRect, &leftFormat, &homeTextBrush);
+			}
 			
 			// AWAY TEAM (Right side)
 			float rightPanelEnd = gameRect.X + gameRect.Width - 15;
@@ -733,7 +914,41 @@ void render_day_schedule(schedule_source_context *context, const std::string& da
 			rightFormat.SetLineAlignment(StringAlignmentCenter);
 			rightFormat.SetTrimming(StringTrimmingEllipsisCharacter);
 			SolidBrush awayTextBrush(awayTextColor);
-			context->graphics->DrawString(awayTeam.c_str(), -1, &gameFont, awayTextRect, &rightFormat, &awayTextBrush);
+			
+			// Check if team name starts with "Winner:" or "Loser:" (unresolved placeholder)
+			std::string awayStr = game.away_team;
+			bool awayIsUnresolved = (awayStr.find("Winner:") == 0 || awayStr.find("Loser:") == 0);
+			
+			if (awayIsUnresolved) {
+				// Unresolved placeholder - split into two lines with smaller font
+				size_t colonPos = awayStr.find(':');
+				std::string prefix = awayStr.substr(0, colonPos);
+				std::string matchup = awayStr.substr(colonPos + 2); // Skip ": "
+				
+				// Use smaller font for two-line display
+				Gdiplus::Font smallerFont(L"Segoe UI", 22, FontStyleBold, UnitPixel);
+				
+				// Draw prefix on first line
+				std::wstring prefixW = std::wstring(prefix.begin(), prefix.end());
+				RectF line1Rect(awayTextRect.X, awayTextRect.Y, awayTextRect.Width, awayTextRect.Height / 2);
+				StringFormat topFormat;
+				topFormat.SetAlignment(StringAlignmentFar);
+				topFormat.SetLineAlignment(StringAlignmentFar);
+				topFormat.SetTrimming(StringTrimmingEllipsisCharacter);
+				context->graphics->DrawString(prefixW.c_str(), -1, &smallerFont, line1Rect, &topFormat, &awayTextBrush);
+				
+				// Draw matchup on second line
+				std::wstring matchupW = std::wstring(matchup.begin(), matchup.end());
+				RectF line2Rect(awayTextRect.X, awayTextRect.Y + awayTextRect.Height / 2, awayTextRect.Width, awayTextRect.Height / 2);
+				StringFormat bottomFormat;
+				bottomFormat.SetAlignment(StringAlignmentFar);
+				bottomFormat.SetLineAlignment(StringAlignmentNear);
+				bottomFormat.SetTrimming(StringTrimmingEllipsisCharacter);
+				context->graphics->DrawString(matchupW.c_str(), -1, &smallerFont, line2Rect, &bottomFormat, &awayTextBrush);
+			} else {
+				// Regular team name or resolved placeholder - single line, normal font
+				context->graphics->DrawString(awayTeam.c_str(), -1, &gameFont, awayTextRect, &rightFormat, &awayTextBrush);
+			}
 			
 			currentY += gameHeight + 10.0f;
 			gameCount++;
@@ -795,6 +1010,38 @@ static void *schedule_source_create(obs_data_t *settings, obs_source_t *source)
 static void schedule_source_update(void *data, obs_data_t *settings)
 {
 	auto *context = static_cast<schedule_source_context*>(data);
+	
+	// Check if global schedule data has been updated externally (e.g., from control panel)
+	if (g_schedule_data && g_schedule_data->last_update > context->last_schedule_update) {
+		blog(LOG_INFO, "[Schedule] Detected external schedule update, refreshing source");
+		context->last_schedule_update = g_schedule_data->last_update;
+		
+		// Clear graphics to force re-render
+		#ifdef _WIN32
+		if (context->render_target) {
+			delete context->render_target;
+			context->render_target = nullptr;
+		}
+		if (context->graphics) {
+			delete context->graphics;
+			context->graphics = nullptr;
+		}
+		
+		// Recreate graphics resources
+		context->render_target = new Bitmap(context->width, context->height, PixelFormat32bppARGB);
+		context->graphics = new Graphics(context->render_target);
+		context->graphics->SetSmoothingMode(SmoothingModeAntiAlias);
+		context->graphics->SetTextRenderingHint(TextRenderingHintAntiAlias);
+		
+		// Clear logo cache to reload
+		for (auto& pair : context->team_logos) {
+			if (pair.second) {
+				delete pair.second;
+			}
+		}
+		context->team_logos.clear();
+		#endif
+	}
 	
 	// Check if config directory setting has changed
 	const char *config_directory = obs_data_get_string(settings, "config_directory");
@@ -956,6 +1203,30 @@ static void schedule_source_get_defaults(obs_data_t *settings)
 static void schedule_source_render(void *data, gs_effect_t *effect)
 {
 	auto *context = static_cast<schedule_source_context*>(data);
+	
+	// Check if global schedule data has been updated and reload if needed
+	if (g_schedule_data && g_schedule_data->last_update > context->last_schedule_update) {
+		blog(LOG_INFO, "[Schedule] Detected schedule update, reloading...");
+		context->last_schedule_update = g_schedule_data->last_update;
+		
+		// Clear the render target to force regeneration
+#ifdef _WIN32
+		if (context->render_target) {
+			delete context->render_target;
+			context->render_target = nullptr;
+		}
+		if (context->graphics) {
+			delete context->graphics;
+			context->graphics = nullptr;
+		}
+		
+		// Recreate graphics resources
+		context->render_target = new Bitmap(context->width, context->height, PixelFormat32bppARGB);
+		context->graphics = new Graphics(context->render_target);
+		context->graphics->SetSmoothingMode(SmoothingModeAntiAlias);
+		context->graphics->SetTextRenderingHint(TextRenderingHintAntiAlias);
+#endif
+	}
 	
 	if (context->active_days.empty()) {
 		return; // No days to show

@@ -6,6 +6,8 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <fstream>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -51,6 +53,14 @@ struct scoreboard_source {
 	std::string home_logo_path;
 	std::string away_logo_path;
 	
+	// Team records (wins-losses-ties)
+	int home_wins;
+	int home_losses;
+	int home_ties;
+	int away_wins;
+	int away_losses;
+	int away_ties;
+	
 	// Next game preview
 	std::string next_home_team;
 	std::string next_away_team;
@@ -85,10 +95,87 @@ struct scoreboard_source {
 	// Clock visibility options
 	bool show_game_clock;
 	bool show_shot_clock;
+	bool show_records;
 };
 
 // Global instance for updates
 static struct scoreboard_source *g_scoreboard = nullptr;
+
+// Getter function for external access
+struct scoreboard_source *get_global_scoreboard() {
+	return g_scoreboard;
+}
+
+// Calculate team record (wins-losses-ties) from schedule
+void calculate_team_record(const std::string& team_name, const std::string& config_dir, int& wins, int& losses, int& ties) {
+	wins = 0;
+	losses = 0;
+	ties = 0;
+	
+	if (team_name.empty() || config_dir.empty()) return;
+	
+	std::string schedule_path = config_dir + "/schedule.csv";
+	std::ifstream file(schedule_path);
+	if (!file.is_open()) {
+		blog(LOG_WARNING, "[Scoreboard] Could not open schedule.csv to calculate record");
+		return;
+	}
+	
+	std::string line;
+	bool first_line = true;
+	
+	while (std::getline(file, line)) {
+		if (first_line) {
+			first_line = false;
+			continue;
+		}
+		if (line.empty()) continue;
+		
+		// Parse CSV line
+		std::vector<std::string> fields;
+		std::string field;
+		bool in_quotes = false;
+		
+		for (size_t i = 0; i < line.size(); i++) {
+			char c = line[i];
+			if (c == '"') {
+				in_quotes = !in_quotes;
+			} else if (c == ',' && !in_quotes) {
+				fields.push_back(field);
+				field.clear();
+			} else {
+				field += c;
+			}
+		}
+		fields.push_back(field);
+		
+		if (fields.size() >= 6) {
+			std::string home = fields[1];
+			std::string away = fields[2];
+			std::string home_score_str = fields[3];
+			std::string away_score_str = fields[4];
+			std::string winner = fields[5];
+			
+			// Check if this team played and if there's a result
+			if ((home == team_name || away == team_name)) {
+				// Check if game has been played (has scores)
+				if (!home_score_str.empty() && !away_score_str.empty()) {
+					if (winner.empty() || winner == "Tie") {
+						// Tie game
+						ties++;
+					} else if (winner == team_name) {
+						wins++;
+					} else {
+						losses++;
+					}
+				}
+			}
+		}
+	}
+	
+	file.close();
+	blog(LOG_INFO, "[Scoreboard] Team %s record: %d-%d-%d", team_name.c_str(), wins, losses, ties);
+}
 
 static const char *scoreboard_source_get_name(void *unused)
 {
@@ -110,6 +197,10 @@ static void *scoreboard_source_create(obs_data_t *settings, obs_source_t *source
 	context->home_team = "Home";
 	context->away_team = "Away";
 	context->period = 1;
+	context->home_wins = 0;
+	context->home_losses = 0;
+	context->away_wins = 0;
+	context->away_losses = 0;
 	context->period_text = "";
 	context->home_exclusions = 0;
 	context->away_exclusions = 0;
@@ -127,6 +218,7 @@ static void *scoreboard_source_create(obs_data_t *settings, obs_source_t *source
 	context->needs_update = true;
 	context->show_game_clock = true;
 	context->show_shot_clock = true;
+	context->show_records = true;
 	
 	// Load settings
 	const char *config_dir = obs_data_get_string(settings, "config_dir");
@@ -134,6 +226,7 @@ static void *scoreboard_source_create(obs_data_t *settings, obs_source_t *source
 		context->config_dir = config_dir;
 	}
 	
+	context->show_records = obs_data_get_bool(settings, "show_records");
 	context->home_color = (uint32_t)obs_data_get_int(settings, "home_color");
 	context->away_color = (uint32_t)obs_data_get_int(settings, "away_color");
 	context->home_text_color = (uint32_t)obs_data_get_int(settings, "home_text_color");
@@ -176,6 +269,13 @@ static void scoreboard_source_update(void *data, obs_data_t *settings)
 	const char *config_dir = obs_data_get_string(settings, "config_dir");
 	if (config_dir && *config_dir) {
 		context->config_dir = config_dir;
+	}
+	
+	// Update show records preference
+	bool show_records = obs_data_get_bool(settings, "show_records");
+	if (show_records != context->show_records) {
+		context->show_records = show_records;
+		context->needs_update = true;
 	}
 	
 	// Update colors
@@ -234,10 +334,10 @@ static void scoreboard_source_render(void *data, gs_effect_t *effect)
 		
 		// Fonts - ESPN style
 		FontFamily fontFamily(L"Arial");
-		Font teamFont(&fontFamily, 22, FontStyleBold, UnitPixel);
-		Font scoreFont(&fontFamily, 48, FontStyleBold, UnitPixel);
-		Font clockFont(&fontFamily, 32, FontStyleBold, UnitPixel);
-		Font smallFont(&fontFamily, 16, FontStyleBold, UnitPixel);
+	Font teamFont(&fontFamily, 22, FontStyleBold, UnitPixel);
+	Font scoreFont(&fontFamily, 48, FontStyleBold, UnitPixel);
+	Font clockFont(&fontFamily, 32, FontStyleBold, UnitPixel);
+	Font recordFont(&fontFamily, 15, FontStyleBold, UnitPixel);
 		Font tinyFont(&fontFamily, 12, FontStyleRegular, UnitPixel);
 		
 		StringFormat leftFormat, centerFormat, rightFormat;
@@ -285,7 +385,7 @@ static void scoreboard_source_render(void *data, gs_effect_t *effect)
 		int rowHeight = 100;
 		
 		// HOME TEAM BOX (left side) - with rounded corners and gradient
-		int homeBoxWidth = 230;
+		int homeBoxWidth = 170;
 		RectF homeBoxRect(leftMargin, yPos, homeBoxWidth, rowHeight);
 		
 		// Create gradient brush for home team
@@ -312,21 +412,28 @@ static void scoreboard_source_render(void *data, gs_effect_t *effect)
 		
 		// Home team logo (left side of box)
 		int logoSize = 70;
-		int logoMargin = 10;
+		int logoMargin = 5;
 		if (!context->home_logo_path.empty()) {
 			std::wstring logoPath(context->home_logo_path.begin(), context->home_logo_path.end());
 			Image* homeLogo = Image::FromFile(logoPath.c_str());
 			if (homeLogo && homeLogo->GetLastStatus() == Ok) {
-				graphics.DrawImage(homeLogo, leftMargin + logoMargin, yPos + (rowHeight - logoSize) / 2, logoSize, logoSize);
+				graphics.DrawImage(homeLogo, leftMargin + logoMargin, yPos + (rowHeight - logoSize) / 2 - 8, logoSize, logoSize);
 				delete homeLogo;
 			} else {
 				blog(LOG_WARNING, "Failed to load home logo: %s", context->home_logo_path.c_str());
 			}
 		}
 		
+		// Home team record under logo (if enabled)
+		if (context->show_records) {
+			std::wstring home_record = L"(" + std::to_wstring(context->home_wins) + L"-" + std::to_wstring(context->home_losses) + L"-" + std::to_wstring(context->home_ties) + L")";
+			RectF homeRecordRect(leftMargin + logoMargin, yPos + (rowHeight - logoSize) / 2 + logoSize - 3, logoSize, 18);
+			graphics.DrawString(home_record.c_str(), -1, &recordFont, homeRecordRect, &centerFormat, &homeTextBrush);
+		}
+		
 		// Calculate text area (between logo and end of box)
-		int textStartX = leftMargin + logoMargin + logoSize + 10;
-		int textWidth = homeBoxWidth - logoMargin - logoSize - 20;
+		int textStartX = leftMargin + logoMargin + logoSize + 5;
+		int textWidth = homeBoxWidth - logoMargin - logoSize - 10;
 		
 		// Home team name (centered in available space)
 		std::wstring home_team_w(context->home_team.begin(), context->home_team.end());
@@ -451,7 +558,7 @@ static void scoreboard_source_render(void *data, gs_effect_t *effect)
 		
 		// AWAY TEAM BOX (right side) - with rounded corners and gradient
 		int awayBoxX = centerX + centerWidth + 10;
-		int awayBoxWidth = 230;
+		int awayBoxWidth = 170;
 		RectF awayBoxRect(awayBoxX, yPos, awayBoxWidth, rowHeight);
 		
 		// Create gradient brush for away team
@@ -480,16 +587,23 @@ static void scoreboard_source_render(void *data, gs_effect_t *effect)
 			std::wstring logoPath(context->away_logo_path.begin(), context->away_logo_path.end());
 			Image* awayLogo = Image::FromFile(logoPath.c_str());
 			if (awayLogo && awayLogo->GetLastStatus() == Ok) {
-				graphics.DrawImage(awayLogo, awayBoxX + logoMargin, yPos + (rowHeight - logoSize) / 2, logoSize, logoSize);
+				graphics.DrawImage(awayLogo, awayBoxX + logoMargin, yPos + (rowHeight - logoSize) / 2 - 8, logoSize, logoSize);
 				delete awayLogo;
 			} else {
 				blog(LOG_WARNING, "Failed to load away logo: %s", context->away_logo_path.c_str());
 			}
 		}
 		
+		// Away team record under logo (if enabled)
+		if (context->show_records) {
+			std::wstring away_record = L"(" + std::to_wstring(context->away_wins) + L"-" + std::to_wstring(context->away_losses) + L"-" + std::to_wstring(context->away_ties) + L")";
+			RectF awayRecordRect(awayBoxX + logoMargin, yPos + (rowHeight - logoSize) / 2 + logoSize - 3, logoSize, 18);
+			graphics.DrawString(away_record.c_str(), -1, &recordFont, awayRecordRect, &centerFormat, &awayTextBrush);
+		}
+		
 		// Calculate text area for away team (between logo and end of box)
-		int awayTextStartX = awayBoxX + logoMargin + logoSize + 10;
-		int awayTextWidth = awayBoxWidth - logoMargin - logoSize - 20;
+		int awayTextStartX = awayBoxX + logoMargin + logoSize + 5;
+		int awayTextWidth = awayBoxWidth - logoMargin - logoSize - 10;
 		
 		// Away team name (centered in available space)
 		std::wstring away_team_w(context->away_team.begin(), context->away_team.end());
@@ -648,8 +762,18 @@ void update_scoreboard_data(obs_data_t *data)
 	
 	const char *home_team = obs_data_get_string(data, "home_team");
 	const char *away_team = obs_data_get_string(data, "away_team");
-	if (home_team && *home_team) g_scoreboard->home_team = home_team;
-	if (away_team && *away_team) g_scoreboard->away_team = away_team;
+	if (home_team && *home_team) {
+		g_scoreboard->home_team = home_team;
+		// Calculate home team record
+		calculate_team_record(g_scoreboard->home_team, g_scoreboard->config_dir, 
+		                      g_scoreboard->home_wins, g_scoreboard->home_losses, g_scoreboard->home_ties);
+	}
+	if (away_team && *away_team) {
+		g_scoreboard->away_team = away_team;
+		// Calculate away team record
+		calculate_team_record(g_scoreboard->away_team, g_scoreboard->config_dir, 
+		                      g_scoreboard->away_wins, g_scoreboard->away_losses, g_scoreboard->away_ties);
+	}
 	
 	// Update logo paths if provided
 	const char *home_logo = obs_data_get_string(data, "home_logo_path");
@@ -724,6 +848,8 @@ static obs_properties_t *scoreboard_source_get_properties(void *data)
 	obs_properties_add_path(props, "config_dir", "Configuration Directory",
 	                        OBS_PATH_DIRECTORY, nullptr, nullptr);
 	
+	obs_properties_add_bool(props, "show_records", "Show Team Records");
+	
 	obs_properties_add_color(props, "home_color", "Home Team Color");
 	obs_properties_add_color(props, "away_color", "Away Team Color");
 	
@@ -732,6 +858,7 @@ static obs_properties_t *scoreboard_source_get_properties(void *data)
 
 static void scoreboard_source_get_defaults(obs_data_t *settings)
 {
+	obs_data_set_default_bool(settings, "show_records", true);
 	obs_data_set_default_int(settings, "home_color", 0xFF0080FF); // Blue
 	obs_data_set_default_int(settings, "away_color", 0xFFFF8000); // Orange
 }
