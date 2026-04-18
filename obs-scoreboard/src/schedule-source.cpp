@@ -1365,14 +1365,10 @@ static obs_properties_t *schedule_source_get_properties(void *data)
 	obs_properties_add_path(props, "config_directory", "Config Directory (teams.csv, schedule.csv, logos)",
 		OBS_PATH_DIRECTORY, nullptr, nullptr);
 	
-	// Try to load schedule data if not already loaded
-	if (!g_schedule_data) {
+	// Always reload schedule data so date checkboxes reflect the current schedule.csv
+	{
 		std::string saved_config_dir = get_saved_config_dir();
-		if (!saved_config_dir.empty()) {
-			update_global_schedule_data(saved_config_dir);
-		} else {
-			update_global_schedule_data("");
-		}
+		update_global_schedule_data(saved_config_dir.empty() ? "" : saved_config_dir);
 	}
 	
 	// Get available dates from current schedule
