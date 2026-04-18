@@ -10,7 +10,6 @@
 
 # Large model files
 *.pth
-*.pt
 
 # Dataset directories with many files
 shotclock dataset/
