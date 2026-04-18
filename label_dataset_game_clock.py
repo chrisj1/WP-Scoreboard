@@ -2,7 +2,7 @@
 Game Clock Dataset Labeling Tool
 Interactive GUI for labeling game clock images extracted from video.
 
-Game clock format: M:SS (minutes:seconds, where minutes is 0-7)
+Game clock format: M:SS (minutes:seconds, where minutes is 0-8)
 Special labels:
 - 'B' = BLOCKED (obscured by player/object)
 - 'X' = BLANK / 0:00 (no clock visible or time expired)
@@ -354,8 +354,8 @@ KEYBOARD SHORTCUTS:
             minutes = int(parts[0])
             seconds = int(parts[1])
             
-            if minutes < 0 or minutes > 7:
-                messagebox.showwarning("Invalid Minutes", "Minutes must be 0-7 (max 7 minute periods)")
+            if minutes < 0 or minutes > 8:
+                messagebox.showwarning("Invalid Minutes", "Minutes must be 0-8")
                 return False
             
             if seconds < 0 or seconds > 59:
@@ -519,7 +519,7 @@ KEYBOARD SHORTCUTS:
                         try:
                             minutes = int(parts[0])
                             seconds = int(parts[1])
-                            if 0 <= minutes <= 7 and 0 <= seconds <= 59:
+                            if 0 <= minutes <= 8 and 0 <= seconds <= 59:
                                 return f"{minutes}:{seconds:02d}"
                         except ValueError:
                             pass
@@ -538,7 +538,7 @@ KEYBOARD SHORTCUTS:
                     else:
                         continue
                     
-                    if 0 <= minutes <= 7 and 0 <= seconds <= 59:
+                    if 0 <= minutes <= 8 and 0 <= seconds <= 59:
                         best_result = f"{minutes}:{seconds:02d}"
                         break
                 

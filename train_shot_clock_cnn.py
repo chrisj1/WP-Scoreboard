@@ -5,13 +5,48 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import cv2
 import json
 import os
+import sys
+import subprocess
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
+from datetime import datetime
 from sklearn.model_selection import train_test_split
 import random
 from scipy import ndimage
 from collections import Counter
+try:
+    from torchvision import transforms as T
+except ImportError:
+    T = None
+
+
+class RandomGaussianNoise:
+    """Add Gaussian noise to a tensor image in [0,1]."""
+
+    def __init__(self, p=0.25, std=0.06):
+        self.p = p
+        self.std = std
+
+    def __call__(self, tensor):
+        if random.random() >= self.p:
+            return tensor
+        noise = torch.randn_like(tensor) * self.std
+        return torch.clamp(tensor + noise, 0.0, 1.0)
+
+
+class RandomSpeckleNoise:
+    """Add multiplicative speckle noise to a tensor image in [0,1]."""
+
+    def __init__(self, p=0.2, std=0.12):
+        self.p = p
+        self.std = std
+
+    def __call__(self, tensor):
+        if random.random() >= self.p:
+            return tensor
+        noise = torch.randn_like(tensor) * self.std
+        return torch.clamp(tensor + (tensor * noise), 0.0, 1.0)
 
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -33,6 +68,81 @@ class ImageAugmentation:
             angle = random.uniform(-max_angle, max_angle)
             img = ndimage.rotate(img, angle, reshape=False, mode='constant', cval=0)
         return img
+
+
+class TorchImageAugmentation:
+    """PyTorch/torchvision augmentation pipeline for grayscale clock crops."""
+
+    def __init__(self):
+        if T is None:
+            raise ImportError("torchvision is required for PyTorch augmentations")
+
+        self.to_pil = T.ToPILImage()
+        self.to_tensor = T.ToTensor()
+
+        # PIL/image-space transforms (includes random scale via RandomAffine scale range)
+        self.pil_augmentations = [
+            T.ElasticTransform(alpha=30.0, sigma=5.0),
+            T.RandomRotation(degrees=15, fill=0),
+            T.RandomAffine(degrees=0, translate=(0.08, 0.08), scale=(0.9, 1.1), shear=8, fill=0),
+            T.ColorJitter(brightness=0.25, contrast=0.25),
+            T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5)),
+            T.RandomPerspective(distortion_scale=0.12, p=1.0, fill=0),
+            T.RandomPosterize(bits=4),
+            T.RandomSolarize(threshold=128),
+            T.RandomAdjustSharpness(sharpness_factor=2.0),
+            T.RandomEqualize(),
+            T.RandomGrayscale(p=1.0),
+            T.RandomInvert(p=1.0),
+            T.AutoAugment(policy=T.AutoAugmentPolicy.IMAGENET),
+        ]
+
+        # Tensor-space transforms
+        self.tensor_augmentations = [
+            RandomGaussianNoise(p=1.0, std=0.06),
+            RandomSpeckleNoise(p=1.0, std=0.12),
+            T.RandomErasing(p=1.0, scale=(0.02, 0.12), ratio=(0.3, 3.3), value=0),
+        ]
+
+        self.min_pil_augments = 3
+        self.max_pil_augments = 7
+        self.min_tensor_augments = 1
+        self.max_tensor_augments = 2
+        self.no_augment_prob = 0.1
+
+    def __call__(self, img):
+        # img is expected as uint8 numpy array (H, W)
+        img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
+        if img_uint8.ndim == 2:
+            # AutoAugment works best with RGB-like images.
+            img_uint8 = np.stack([img_uint8, img_uint8, img_uint8], axis=-1)
+
+        if random.random() < self.no_augment_prob:
+            tensor = self.to_tensor(self.to_pil(img_uint8))
+        else:
+            img_pil = self.to_pil(img_uint8)
+
+            pil_ops = random.sample(
+                self.pil_augmentations,
+                k=random.randint(self.min_pil_augments, self.max_pil_augments),
+            )
+            for op in pil_ops:
+                img_pil = op(img_pil)
+
+            tensor = self.to_tensor(img_pil)
+
+            tensor_ops = random.sample(
+                self.tensor_augmentations,
+                k=random.randint(self.min_tensor_augments, self.max_tensor_augments),
+            )
+            for op in tensor_ops:
+                tensor = op(tensor)
+
+        tensor = (tensor * 255.0).clamp(0, 255).to(torch.uint8)
+        if tensor.dim() == 3 and tensor.shape[0] >= 1:
+            # Convert back to grayscale by taking first channel.
+            tensor = tensor[0]
+        return tensor.cpu().numpy()
     
     def random_brightness(self, img, factor_range=(0.7, 1.3)):
         """Randomly adjust brightness"""
@@ -296,7 +406,7 @@ class ImageAugmentation:
         
         return img
     
-    def __call__(self, img):
+    def _legacy_call_disabled(self, img):
         """Apply a random subset of augmentations in random order"""
         # Store as float for transformations
         img = img.astype(np.float32)
@@ -339,7 +449,7 @@ class ImageAugmentation:
         
         return img
 
-def create_balanced_sampler(image_paths, labels):
+def create_balanced_sampler(class_keys):
     """
     Create a WeightedRandomSampler that ensures equal probability for each unique shot clock value.
     
@@ -352,15 +462,15 @@ def create_balanced_sampler(image_paths, labels):
     
     This ensures each shot clock value has equal probability of being selected.
     """
-    # Count occurrences of each unique label
-    label_counts = Counter(labels)
+    # Count occurrences of each unique label key
+    label_counts = Counter(class_keys)
     
     # Calculate weight for each sample
     # Weight = 1 / (count of that label)
     # This makes each unique label equally likely to be selected
     sample_weights = []
-    for label in labels:
-        weight = 1.0 / label_counts[label]
+    for key in class_keys:
+        weight = 1.0 / label_counts[key]
         sample_weights.append(weight)
     
     print(f"Shot clock label distribution for balanced sampling:")
@@ -387,7 +497,7 @@ class ShotClockDataset(Dataset):
         
         # Initialize augmentation if needed
         if self.augment:
-            self.augmenter = ImageAugmentation(apply_prob=0.8)
+            self.augmenter = TorchImageAugmentation()
         
     def __len__(self):
         return len(self.image_paths)
@@ -432,7 +542,7 @@ class ShotClockDataset(Dataset):
         # Get label
         label_tensor = torch.from_numpy(self.labels[idx])
         
-        return img_tensor, label_tensor
+        return img_tensor, label_tensor, img_path
 
 class ShotClockCNN(nn.Module):
     def __init__(self):
@@ -504,18 +614,48 @@ class ShotClockCNN(nn.Module):
         
         return digit1, digit2, blocked, inconclusive
 
-def load_dataset(dataset_dir):
-    """Load dataset from directory with labels.json"""
-    labels_path = os.path.join(dataset_dir, 'labels.json')
-    
-    if not os.path.exists(labels_path):
-        raise FileNotFoundError(f"labels.json not found in {dataset_dir}")
-    
-    with open(labels_path, 'r') as f:
+def normalize_shot_label(label):
+    """Normalize legacy and new shot-clock labels to a canonical format."""
+    if label is None:
+        return None
+
+    if isinstance(label, (int, float)):
+        value = int(label)
+        if 0 <= value <= 30:
+            return str(value)
+        return None
+
+    label_str = str(label).strip()
+    if not label_str:
+        return None
+
+    lower = label_str.lower()
+    if lower in {'blocked', 'block', 'b'}:
+        return 'BLOCKED'
+    if lower in {'inconclusive', 'unknown', 'unclear', 's'}:
+        return 'INCONCLUSIVE'
+    if lower in {'blank', 'x', '00', '0:00'}:
+        return 'BLANK'
+
+    if lower.isdigit():
+        value = int(lower)
+        if 0 <= value <= 30:
+            return str(value)
+
+    return None
+
+
+def load_dataset(dataset_dir, labels_file):
+    """Load dataset from labels file (game-clock-style workflow) with legacy compatibility."""
+    if not os.path.exists(labels_file):
+        raise FileNotFoundError(f"Labels file not found: {labels_file}")
+
+    with open(labels_file, 'r', encoding='utf-8') as f:
         labels_dict = json.load(f)
     
     image_paths = []
     labels = []
+    class_keys = []
     
     for filename, label in labels_dict.items():
         img_path = os.path.join(dataset_dir, filename)
@@ -524,16 +664,23 @@ def load_dataset(dataset_dir):
             print(f"Warning: Image not found: {img_path}")
             continue
         
+        normalized_label = normalize_shot_label(label)
+
+        if normalized_label is None:
+            print(f"Warning: Could not normalize label '{label}' for file '{filename}', skipping")
+            continue
+
         # Convert label to 22-dim vector
-        label_vector = parse_label(label)
+        label_vector, class_key = parse_label(normalized_label)
         
         if label_vector is not None:
             image_paths.append(img_path)
             labels.append(label_vector)
+            class_keys.append(class_key)
     
     print(f"Loaded {len(image_paths)} images from {dataset_dir}")
     
-    return image_paths, np.array(labels, dtype=np.float32)
+    return image_paths, np.array(labels, dtype=np.float32), class_keys
 
 def parse_label(label):
     """
@@ -545,22 +692,22 @@ def parse_label(label):
     """
     vector = np.zeros(22, dtype=np.float32)
     
-    if label == 'blocked':
+    if label == 'BLOCKED':
         vector[20] = 1.0  # Blocked flag
-        return vector
-    elif label == 'inconclusive':
+        return vector, 'BLOCKED'
+    elif label == 'INCONCLUSIVE':
         vector[21] = 1.0  # Inconclusive flag
-        return vector
-    elif label == 'blank':
+        return vector, 'INCONCLUSIVE'
+    elif label == 'BLANK':
         # Skip blank labels - they don't have clear digit values
-        return None
+        return None, None
     else:
         # Numeric label (0-30)
         try:
             value = int(label)
             if not (0 <= value <= 30):
                 print(f"Warning: Invalid value {value}, skipping")
-                return None
+                return None, None
             
             # Prepend 0 for single digits (e.g., 5 -> 05)
             value_str = str(value).zfill(2)
@@ -572,10 +719,10 @@ def parse_label(label):
             vector[digit1] = 1.0  # First digit (0-9)
             vector[10 + digit2] = 1.0  # Second digit (0-9)
             
-            return vector
+            return vector, f"NUM_{value_str}"
         except ValueError:
             print(f"Warning: Could not parse label '{label}', skipping")
-            return None
+            return None, None
 
 def train_epoch(model, dataloader, criterion_ce, criterion_bce, optimizer, device):
     """Train for one epoch"""
@@ -585,7 +732,7 @@ def train_epoch(model, dataloader, criterion_ce, criterion_bce, optimizer, devic
     correct_digit2 = 0
     total_samples = 0
     
-    for images, labels in dataloader:
+    for images, labels, _img_paths in dataloader:
         images = images.to(device)
         labels = labels.to(device)
         
@@ -626,7 +773,25 @@ def train_epoch(model, dataloader, criterion_ce, criterion_bce, optimizer, devic
     
     return avg_loss, acc_digit1, acc_digit2
 
-def validate(model, dataloader, criterion_ce, criterion_bce, device):
+def _label_from_targets(digit1, digit2, blocked_flag, inconclusive_flag):
+    if inconclusive_flag:
+        return "INCONCLUSIVE"
+    if blocked_flag:
+        return "BLOCKED"
+    value = int(digit1) * 10 + int(digit2)
+    return str(value)
+
+
+def _label_from_outputs(pred1, pred2, blocked_prob, inconclusive_prob):
+    if inconclusive_prob >= 0.5 and inconclusive_prob >= blocked_prob:
+        return "INCONCLUSIVE"
+    if blocked_prob >= 0.5:
+        return "BLOCKED"
+    value = int(pred1) * 10 + int(pred2)
+    return str(value)
+
+
+def validate(model, dataloader, criterion_ce, criterion_bce, device, max_examples=10):
     """Validate the model"""
     model.eval()
     total_loss = 0
@@ -634,9 +799,10 @@ def validate(model, dataloader, criterion_ce, criterion_bce, device):
     correct_digit2 = 0
     correct_both = 0
     total_samples = 0
+    misclassified_examples = []
     
     with torch.no_grad():
-        for images, labels in dataloader:
+        for images, labels, img_paths in dataloader:
             images = images.to(device)
             labels = labels.to(device)
             
@@ -663,7 +829,48 @@ def validate(model, dataloader, criterion_ce, criterion_bce, device):
             _, pred2 = torch.max(digit2_out, 1)
             correct_digit1 += (pred1 == digit1_labels).sum().item()
             correct_digit2 += (pred2 == digit2_labels).sum().item()
-            correct_both += ((pred1 == digit1_labels) & (pred2 == digit2_labels)).sum().item()
+
+            blocked_probs = blocked_out.squeeze(1)
+            inconclusive_probs = inconclusive_out.squeeze(1)
+            blocked_preds = (blocked_probs >= 0.5).long()
+            inconclusive_preds = (inconclusive_probs >= 0.5).long()
+            blocked_true = blocked_labels.squeeze(1).long()
+            inconclusive_true = inconclusive_labels.squeeze(1).long()
+
+            digits_correct = (pred1 == digit1_labels) & (pred2 == digit2_labels)
+            flags_correct = (blocked_preds == blocked_true) & (inconclusive_preds == inconclusive_true)
+            all_correct = digits_correct & flags_correct
+            correct_both += all_correct.sum().item()
+
+            if len(misclassified_examples) < max_examples:
+                mis_indices = torch.where(~all_correct)[0].tolist()
+                for idx in mis_indices:
+                    if len(misclassified_examples) >= max_examples:
+                        break
+
+                    pred_label = _label_from_outputs(
+                        pred1[idx].item(),
+                        pred2[idx].item(),
+                        blocked_probs[idx].item(),
+                        inconclusive_probs[idx].item(),
+                    )
+                    true_label = _label_from_targets(
+                        digit1_labels[idx].item(),
+                        digit2_labels[idx].item(),
+                        blocked_true[idx].item() == 1,
+                        inconclusive_true[idx].item() == 1,
+                    )
+
+                    image_path = img_paths[idx] if isinstance(img_paths, list) else str(img_paths[idx])
+                    misclassified_examples.append(
+                        {
+                            "image_file": os.path.basename(image_path),
+                            "image_path": image_path,
+                            "true_label": true_label,
+                            "pred_label": pred_label,
+                        }
+                    )
+
             total_samples += labels.size(0)
     
     avg_loss = total_loss / len(dataloader)
@@ -671,19 +878,36 @@ def validate(model, dataloader, criterion_ce, criterion_bce, device):
     acc_digit2 = 100 * correct_digit2 / total_samples
     acc_both = 100 * correct_both / total_samples
     
-    return avg_loss, acc_digit1, acc_digit2, acc_both
+    return avg_loss, acc_digit1, acc_digit2, acc_both, misclassified_examples
 
 def main():
     # Hyperparameters
     BATCH_SIZE = 16  # Smaller batch size for better generalization
     LEARNING_RATE = 0.0005  # Lower learning rate for more stable training
-    NUM_EPOCHS = 500
-    DATASET_DIR = r'shotclock dataset\dataset_MVI_7463 - Trim'
+    NUM_EPOCHS = int(os.getenv('SHOT_CLOCK_NUM_EPOCHS', '500'))
+    DATASET_DIR = 'shot_clock_dataset'
+    LABELS_FILE = 'shot_clock_labels.json'
     WEIGHT_DECAY = 1e-4  # L2 regularization
+
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("training_live", f"shot_clock_{run_id}")
+    mis_dir = os.path.join(run_dir, "misclassifications")
+    metrics_path = os.path.join(run_dir, "metrics.jsonl")
+    os.makedirs(mis_dir, exist_ok=True)
+
+    print(f"Live run directory: {run_dir}")
+
+    monitor_script = os.path.join(os.path.dirname(__file__), "training_monitor_gui.py")
+    if os.path.exists(monitor_script):
+        try:
+            subprocess.Popen([sys.executable, monitor_script, "--run-dir", run_dir])
+            print("Launched training monitor GUI")
+        except Exception as exc:
+            print(f"Warning: could not launch training monitor GUI: {exc}")
     
     # Load dataset
     print("Loading dataset...")
-    image_paths, labels = load_dataset(DATASET_DIR)
+    image_paths, labels, class_keys = load_dataset(DATASET_DIR, LABELS_FILE)
     
     if len(image_paths) == 0:
         print("Error: No valid images found!")
@@ -693,8 +917,8 @@ def main():
     print(f"Label shape: {labels.shape}")
     
     # Split into train and validation
-    train_paths, val_paths, train_labels, val_labels = train_test_split(
-        image_paths, labels, test_size=0.2, random_state=42
+    train_paths, val_paths, train_labels, val_labels, train_class_keys, val_class_keys = train_test_split(
+        image_paths, labels, class_keys, test_size=0.2, random_state=42
     )
     
     print(f"Training samples: {len(train_paths)}")
@@ -706,8 +930,8 @@ def main():
     
     # Create balanced samplers for both training and validation
     # This ensures equal probability for each shot clock value in both training and evaluation
-    train_sampler = create_balanced_sampler(train_paths, train_labels)
-    val_sampler = create_balanced_sampler(val_paths, val_labels)
+    train_sampler = create_balanced_sampler(train_class_keys)
+    val_sampler = create_balanced_sampler(val_class_keys)
     
     # Create dataloaders
     # Use balanced samplers for both training and validation
@@ -751,9 +975,36 @@ def main():
         )
         
         # Validate
-        val_loss, val_acc1, val_acc2, val_acc_both = validate(
-            model, val_loader, criterion_ce, criterion_bce, device
+        val_loss, val_acc1, val_acc2, val_acc_both, misclassified_examples = validate(
+            model,
+            val_loader,
+            criterion_ce,
+            criterion_bce,
+            device,
+            max_examples=10,
         )
+
+        with open(metrics_path, "a", encoding="utf-8") as mf:
+            mf.write(
+                json.dumps(
+                    {
+                        "epoch": epoch + 1,
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "train_acc_all": (train_acc1 + train_acc2) / 2.0,
+                        "val_acc_all": val_acc_both,
+                        "train_acc_digit1": train_acc1,
+                        "train_acc_digit2": train_acc2,
+                        "val_acc_digit1": val_acc1,
+                        "val_acc_digit2": val_acc2,
+                    }
+                )
+                + "\n"
+            )
+
+        mis_path = os.path.join(mis_dir, f"epoch_{epoch + 1:04d}.json")
+        with open(mis_path, "w", encoding="utf-8") as ef:
+            json.dump(misclassified_examples, ef, indent=2)
         
         # Update scheduler (cosine annealing doesn't need loss)
         scheduler.step()

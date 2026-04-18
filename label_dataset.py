@@ -578,7 +578,7 @@ class DatasetLabeler:
         self.root.destroy()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = DatasetLabeler(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
-    root.mainloop()
+    # Compatibility entrypoint: use the new game-clock-style workflow.
+    from label_dataset_shot_clock import main as shot_clock_label_main
+
+    shot_clock_label_main()

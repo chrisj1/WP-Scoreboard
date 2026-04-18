@@ -439,7 +439,7 @@ class ShotClockDatasetCreator:
         self.root.destroy()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ShotClockDatasetCreator(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
-    root.mainloop()
+    # Compatibility entrypoint: use the new game-clock-style workflow.
+    from image_cropper_shot_clock import main as shot_clock_main
+
+    shot_clock_main()

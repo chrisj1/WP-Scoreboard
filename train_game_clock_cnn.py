@@ -1,15 +1,15 @@
 """
 Game Clock CNN Training Script
 
-Trains a CNN to recognize game clock time in M:SS format (0:00 to 7:59)
+Trains a CNN to recognize game clock time in M:SS format (0:00 to 8:59)
 Architecture predicts:
-- Minute digit (0-7): 8 classes
+- Minute digit (0-8): 9 classes
 - First second digit (0-5): 6 classes
 - Second second digit (0-9): 10 classes
 - Blocked flag: binary (sigmoid)
 - Blank/0:00 flag: binary (sigmoid)
 
-Total outputs: 8 + 6 + 10 + 1 + 1 = 26 outputs
+Total outputs: 9 + 6 + 10 + 1 + 1 = 27 outputs
 
 Usage:
     python train_game_clock_cnn.py
@@ -22,6 +22,9 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import cv2
 import json
 import os
+import sys
+import subprocess
+from datetime import datetime
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -29,6 +32,38 @@ from sklearn.model_selection import train_test_split
 import random
 from scipy import ndimage
 from collections import Counter
+try:
+    from torchvision import transforms as T
+except ImportError:
+    T = None
+
+
+class RandomGaussianNoise:
+    """Add Gaussian noise to a tensor image in [0,1]."""
+
+    def __init__(self, p=0.25, std=0.06):
+        self.p = p
+        self.std = std
+
+    def __call__(self, tensor):
+        if random.random() >= self.p:
+            return tensor
+        noise = torch.randn_like(tensor) * self.std
+        return torch.clamp(tensor + noise, 0.0, 1.0)
+
+
+class RandomSpeckleNoise:
+    """Add multiplicative speckle noise to a tensor image in [0,1]."""
+
+    def __init__(self, p=0.2, std=0.12):
+        self.p = p
+        self.std = std
+
+    def __call__(self, tensor):
+        if random.random() >= self.p:
+            return tensor
+        noise = torch.randn_like(tensor) * self.std
+        return torch.clamp(tensor + (tensor * noise), 0.0, 1.0)
 
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -40,7 +75,7 @@ class ImageAugmentation:
     def __init__(self, apply_prob=0.8):
         self.apply_prob = apply_prob
     
-    def random_rotation(self, img, max_angle=15):
+    def random_rotation(self, img, max_angle=45):
         if random.random() < self.apply_prob:
             angle = random.uniform(-max_angle, max_angle)
             img = ndimage.rotate(img, angle, reshape=False, mode='constant', cval=0)
@@ -317,6 +352,81 @@ class ImageAugmentation:
         return np.clip(img, 0, 255).astype(np.uint8)
 
 
+class TorchImageAugmentation:
+    """PyTorch/torchvision augmentation pipeline for grayscale clock crops."""
+
+    def __init__(self):
+        if T is None:
+            raise ImportError("torchvision is required for PyTorch augmentations")
+
+        self.to_pil = T.ToPILImage()
+        self.to_tensor = T.ToTensor()
+
+        # PIL/image-space transforms (includes random scale via RandomAffine scale range)
+        self.pil_augmentations = [
+            T.ElasticTransform(alpha=30.0, sigma=5.0),
+            T.RandomRotation(degrees=15, fill=0),
+            T.RandomAffine(degrees=0, translate=(0.08, 0.08), scale=(0.9, 1.1), shear=8, fill=0),
+            T.ColorJitter(brightness=0.25, contrast=0.25),
+            T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5)),
+            T.RandomPerspective(distortion_scale=0.12, p=1.0, fill=0),
+            T.RandomPosterize(bits=4),
+            T.RandomSolarize(threshold=128),
+            T.RandomAdjustSharpness(sharpness_factor=2.0),
+            T.RandomEqualize(),
+            T.RandomGrayscale(p=1.0),
+            T.RandomInvert(p=1.0),
+            T.AutoAugment(policy=T.AutoAugmentPolicy.IMAGENET),
+        ]
+
+        # Tensor-space transforms
+        self.tensor_augmentations = [
+            RandomGaussianNoise(p=1.0, std=0.06),
+            RandomSpeckleNoise(p=1.0, std=0.12),
+            T.RandomErasing(p=1.0, scale=(0.02, 0.12), ratio=(0.3, 3.3), value=0),
+        ]
+
+        self.min_pil_augments = 3
+        self.max_pil_augments = 7
+        self.min_tensor_augments = 1
+        self.max_tensor_augments = 2
+        self.no_augment_prob = 0.1
+
+    def __call__(self, img):
+        # img is expected as uint8 numpy array (H, W)
+        img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
+        if img_uint8.ndim == 2:
+            # AutoAugment works best with RGB-like images.
+            img_uint8 = np.stack([img_uint8, img_uint8, img_uint8], axis=-1)
+
+        if random.random() < self.no_augment_prob:
+            tensor = self.to_tensor(self.to_pil(img_uint8))
+        else:
+            img_pil = self.to_pil(img_uint8)
+
+            pil_ops = random.sample(
+                self.pil_augmentations,
+                k=random.randint(self.min_pil_augments, self.max_pil_augments),
+            )
+            for op in pil_ops:
+                img_pil = op(img_pil)
+
+            tensor = self.to_tensor(img_pil)
+
+            tensor_ops = random.sample(
+                self.tensor_augmentations,
+                k=random.randint(self.min_tensor_augments, self.max_tensor_augments),
+            )
+            for op in tensor_ops:
+                tensor = op(tensor)
+
+        tensor = (tensor * 255.0).clamp(0, 255).to(torch.uint8)
+        if tensor.dim() == 3 and tensor.shape[0] >= 1:
+            # Convert back to grayscale by taking first channel.
+            tensor = tensor[0]
+        return tensor.cpu().numpy()
+
+
 def create_balanced_sampler(image_files, labels_dict):
     """
     Create a WeightedRandomSampler that ensures equal probability for each unique time value.
@@ -368,7 +478,7 @@ class GameClockDataset(Dataset):
         self.augment = augment
         
         if augment:
-            self.augmentation = ImageAugmentation(apply_prob=0.8)
+            self.augmentation = TorchImageAugmentation()
         
         print(f"Dataset: {len(image_files)} images, augmentation={'ON' if augment else 'OFF'}")
     
@@ -377,7 +487,7 @@ class GameClockDataset(Dataset):
     
     def parse_label(self, label_str):
         """
-        Parse label string into minute, seconds1, seconds2, blocked, blank
+    Parse label string into minute, seconds1, seconds2, blocked, blank
         Returns: (minute_class, sec1_class, sec2_class, is_blocked, is_blank)
         """
         if label_str == "BLOCKED":
@@ -399,7 +509,7 @@ class GameClockDataset(Dataset):
                 seconds = int(parts[1])
                 
                 # Validate ranges
-                if not (0 <= minute <= 7):
+                if not (0 <= minute <= 8):
                     print(f"Warning: Invalid minute {minute} in {label_str}")
                     minute = 0
                 if not (0 <= seconds <= 59):
@@ -451,7 +561,7 @@ class GameClockDataset(Dataset):
         blocked_tensor = torch.tensor(blocked, dtype=torch.float32)
         blank_tensor = torch.tensor(blank, dtype=torch.float32)
         
-        return img_tensor, minute_tensor, sec1_tensor, sec2_tensor, blocked_tensor, blank_tensor
+        return img_tensor, minute_tensor, sec1_tensor, sec2_tensor, blocked_tensor, blank_tensor, img_file
 
 
 class GameClockCNN(nn.Module):
@@ -484,7 +594,7 @@ class GameClockCNN(nn.Module):
         
         # Output heads with separate hidden layers
         self.fc_minute_hidden = nn.Linear(256, 128)
-        self.fc_minute = nn.Linear(128, 8)  # Minute (0-7)
+        self.fc_minute = nn.Linear(128, 9)  # Minute (0-8)
         
         self.fc_sec1_hidden = nn.Linear(256, 128)
         self.fc_sec1 = nn.Linear(128, 6)  # First second digit (0-5)
@@ -546,7 +656,7 @@ def train_epoch(model, train_loader, criterion_ce, criterion_ce_sec2, criterion_
     correct_all = 0
     total = 0
     
-    for batch_idx, (images, minutes, sec1s, sec2s, blockeds, blanks) in enumerate(train_loader):
+    for batch_idx, (images, minutes, sec1s, sec2s, blockeds, blanks, _img_files) in enumerate(train_loader):
         images = images.to(device)
         minutes = minutes.to(device)
         sec1s = sec1s.to(device)
@@ -600,7 +710,16 @@ def train_epoch(model, train_loader, criterion_ce, criterion_ce_sec2, criterion_
     return avg_loss, acc_minute, acc_sec1, acc_sec2, acc_all
 
 
-def validate(model, val_loader, criterion_ce, criterion_ce_sec2, criterion_bce, device):
+def _format_label(minute, sec1, sec2, blocked_flag, blank_flag):
+    if blocked_flag:
+        return "BLOCKED"
+    if blank_flag:
+        return "BLANK"
+    seconds = int(sec1) * 10 + int(sec2)
+    return f"{int(minute)}:{seconds:02d}"
+
+
+def validate(model, val_loader, criterion_ce, criterion_ce_sec2, criterion_bce, device, dataset_dir=None, max_examples=8):
     """Validate model"""
     model.eval()
     total_loss = 0
@@ -609,9 +728,10 @@ def validate(model, val_loader, criterion_ce, criterion_ce_sec2, criterion_bce, 
     correct_sec2 = 0
     correct_all = 0
     total = 0
+    misclassified_examples = []
     
     with torch.no_grad():
-        for images, minutes, sec1s, sec2s, blockeds, blanks in val_loader:
+        for images, minutes, sec1s, sec2s, blockeds, blanks, img_files in val_loader:
             images = images.to(device)
             minutes = minutes.to(device)
             sec1s = sec1s.to(device)
@@ -645,6 +765,59 @@ def validate(model, val_loader, criterion_ce, criterion_ce_sec2, criterion_bce, 
             
             all_correct = (pred_minute == minutes) & (pred_sec1 == sec1s) & (pred_sec2 == sec2s)
             correct_all += all_correct.sum().item()
+
+            # Capture a small set of misclassification examples for live GUI.
+            mis_mask = ~all_correct
+            if len(misclassified_examples) < max_examples and torch.any(mis_mask):
+                blocked_probs = blocked_out.squeeze(1).detach().cpu()
+                blank_probs = blank_out.squeeze(1).detach().cpu()
+
+                pred_minute_cpu = pred_minute.detach().cpu()
+                pred_sec1_cpu = pred_sec1.detach().cpu()
+                pred_sec2_cpu = pred_sec2.detach().cpu()
+
+                minutes_cpu = minutes.detach().cpu()
+                sec1s_cpu = sec1s.detach().cpu()
+                sec2s_cpu = sec2s.detach().cpu()
+                blockeds_cpu = blockeds.squeeze(1).detach().cpu()
+                blanks_cpu = blanks.squeeze(1).detach().cpu()
+
+                mis_indices = torch.where(mis_mask.detach().cpu())[0].tolist()
+                for idx in mis_indices:
+                    if len(misclassified_examples) >= max_examples:
+                        break
+
+                    pred_blocked = blocked_probs[idx].item() > 0.5
+                    pred_blank = blank_probs[idx].item() > 0.5
+                    true_blocked = blockeds_cpu[idx].item() > 0.5
+                    true_blank = blanks_cpu[idx].item() > 0.5
+
+                    pred_label = _format_label(
+                        pred_minute_cpu[idx].item(),
+                        pred_sec1_cpu[idx].item(),
+                        pred_sec2_cpu[idx].item(),
+                        pred_blocked,
+                        pred_blank,
+                    )
+                    true_label = _format_label(
+                        minutes_cpu[idx].item(),
+                        sec1s_cpu[idx].item(),
+                        sec2s_cpu[idx].item(),
+                        true_blocked,
+                        true_blank,
+                    )
+
+                    img_file = img_files[idx] if isinstance(img_files, list) else str(img_files[idx])
+                    image_path = os.path.join(dataset_dir, img_file) if dataset_dir else img_file
+
+                    misclassified_examples.append(
+                        {
+                            "image_file": img_file,
+                            "image_path": image_path,
+                            "true_label": true_label,
+                            "pred_label": pred_label,
+                        }
+                    )
             
             total += minutes.size(0)
     
@@ -654,7 +827,7 @@ def validate(model, val_loader, criterion_ce, criterion_ce_sec2, criterion_bce, 
     acc_sec2 = 100.0 * correct_sec2 / total
     acc_all = 100.0 * correct_all / total
     
-    return avg_loss, acc_minute, acc_sec1, acc_sec2, acc_all
+    return avg_loss, acc_minute, acc_sec1, acc_sec2, acc_all, misclassified_examples
 
 
 def main():
@@ -668,6 +841,23 @@ def main():
     batch_size = 32
     num_epochs = 250
     learning_rate = 0.001
+
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("training_live", f"game_clock_{run_id}")
+    mis_dir = os.path.join(run_dir, "misclassifications")
+    metrics_path = os.path.join(run_dir, "metrics.jsonl")
+    os.makedirs(mis_dir, exist_ok=True)
+
+    print(f"Live run directory: {run_dir}")
+
+    # Best-effort auto-launch of live monitor GUI.
+    monitor_script = os.path.join(os.path.dirname(__file__), "training_monitor_gui.py")
+    if os.path.exists(monitor_script):
+        try:
+            subprocess.Popen([sys.executable, monitor_script, "--run-dir", run_dir])
+            print("Launched training monitor GUI")
+        except Exception as exc:
+            print(f"Warning: could not launch training monitor GUI: {exc}")
     
     # Load labels
     if not os.path.exists(labels_file):
@@ -740,9 +930,41 @@ def main():
         )
         
         # Validate
-        val_loss, val_acc_m, val_acc_s1, val_acc_s2, val_acc_all = validate(
-            model, val_loader, criterion_ce, criterion_ce_sec2, criterion_bce, device
+        val_loss, val_acc_m, val_acc_s1, val_acc_s2, val_acc_all, misclassified_examples = validate(
+            model,
+            val_loader,
+            criterion_ce,
+            criterion_ce_sec2,
+            criterion_bce,
+            device,
+            dataset_dir=dataset_dir,
+            max_examples=10,
         )
+
+        # Emit live metrics for real-time GUI.
+        with open(metrics_path, "a", encoding="utf-8") as mf:
+            mf.write(
+                json.dumps(
+                    {
+                        "epoch": epoch + 1,
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "train_acc_all": train_acc_all,
+                        "val_acc_all": val_acc_all,
+                        "train_acc_minute": train_acc_m,
+                        "train_acc_sec1": train_acc_s1,
+                        "train_acc_sec2": train_acc_s2,
+                        "val_acc_minute": val_acc_m,
+                        "val_acc_sec1": val_acc_s1,
+                        "val_acc_sec2": val_acc_s2,
+                    }
+                )
+                + "\n"
+            )
+
+        mis_path = os.path.join(mis_dir, f"epoch_{epoch + 1:04d}.json")
+        with open(mis_path, "w", encoding="utf-8") as ef:
+            json.dump(misclassified_examples, ef, indent=2)
         
         # Store metrics
         train_losses.append(train_loss)
