@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <cstdlib>
 
 // ============================================================================
 // BayesianShotClockFilter Implementation
@@ -563,9 +564,15 @@ void BayesianGameClockFilter::resetPrior() {
 // ShotClockCNN Implementation
 // ============================================================================
 
-ShotClockCNN::ShotClockCNN() 
+ShotClockCNN::ShotClockCNN()
     : model_loaded(false), device(torch::kCPU) {
-    // Wrap device initialization to catch any errors
+    // Prevent OpenMP library conflict: LibTorch uses Intel libiomp5 which
+    // aborts if another OpenMP runtime (e.g. libomp from Homebrew/OpenCV)
+    // has already been loaded. KMP_DUPLICATE_LIB_OK=TRUE suppresses the abort.
+    setenv("KMP_DUPLICATE_LIB_OK", "TRUE", 1);
+    // Single-threaded inference avoids most OpenMP initialization issues
+    // and reduces latency spikes in the OBS video thread.
+    at::set_num_threads(1);
     try {
         blog(LOG_INFO, "Shot Clock CNN: Initializing with CPU device");
     } catch (const std::exception& e) {
@@ -578,10 +585,6 @@ ShotClockCNN::~ShotClockCNN() {
 
 bool ShotClockCNN::loadModel(const std::string& model_path) {
     try {
-        // Force single-threaded mode to prevent crashes
-        torch::set_num_threads(1);
-        torch::set_num_interop_threads(1);
-        
         blog(LOG_INFO, "Shot Clock CNN: Loading model from %s", model_path.c_str());
         model = torch::jit::load(model_path, device);
         model.eval();
@@ -755,10 +758,6 @@ GameClockCNN::~GameClockCNN() {
 
 bool GameClockCNN::loadModel(const std::string& model_path) {
     try {
-        // Force single-threaded mode to prevent crashes
-        torch::set_num_threads(1);
-        torch::set_num_interop_threads(1);
-        
         blog(LOG_INFO, "Game Clock CNN: Loading model from %s", model_path.c_str());
         model = torch::jit::load(model_path, device);
         model.eval();
@@ -1105,7 +1104,7 @@ ClockPrediction ClockOCREngine::predictShotClock() {
     result.is_special = false;
     result.is_fresh_cnn = false;
     
-    if (last_frame.empty() || !shot_clock_cnn->isLoaded()) {
+    if (last_frame.empty() || !shot_clock_cnn || !shot_clock_cnn->isLoaded()) {
         return result;
     }
     
@@ -1191,7 +1190,7 @@ ClockPrediction ClockOCREngine::predictGameClock() {
     result.is_special = false;
     result.is_fresh_cnn = false;
     
-    if (last_frame.empty() || !game_clock_cnn->isLoaded()) {
+    if (last_frame.empty() || !game_clock_cnn || !game_clock_cnn->isLoaded()) {
         return result;
     }
     

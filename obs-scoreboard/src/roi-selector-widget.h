@@ -15,6 +15,10 @@
 #include <QMessageBox>
 
 #ifdef USE_CNN_OCR
+#ifdef __APPLE__
+#undef NO
+#undef YES
+#endif
 #include <opencv2/opencv.hpp>
 
 struct ROI {
@@ -44,6 +48,7 @@ public:
     void setGameClockROI(const ROI& roi);
     ROI getShotClockROI() const { return shot_clock_roi; }
     ROI getGameClockROI() const { return game_clock_roi; }
+    QImage getFrame() const { return current_frame; }
     
     void setSelectionMode(const QString& mode); // "shot" or "game"
     QString getSelectionMode() const { return selection_mode; }
@@ -129,6 +134,7 @@ private:
     
     // UI components
     ROICanvas* canvas;
+    QGroupBox* camera_group;
     QComboBox* camera_combo;
     QSpinBox* camera_index_spin;
     QComboBox* mode_combo;

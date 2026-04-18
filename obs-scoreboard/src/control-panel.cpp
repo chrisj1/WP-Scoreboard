@@ -1,3 +1,7 @@
+#include <mutex>
+
+#include "scoreboard-source.h"
+
 #include <QWidget>
 #include <QMainWindow>
 #include <QVBoxLayout>
@@ -15,14 +19,16 @@
 #include <QFile>
 #include <QTextStream>
 #include <QColorDialog>
-#include <QPushButton>
 #include <QSettings>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QCheckBox>
-#include <QFileDialog>
 #include <QDir>
 #include <QMessageBox>
 #include <QScrollArea>
 #include <QInputDialog>
+#include <QMutex>
 #include <obs.h>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -36,6 +42,10 @@
 #include "clock-ocr-engine.h"
 #include "histogram-viz-source.h"
 #include "averaged-frame-viz-source.h"
+#ifdef __APPLE__
+#undef NO
+#undef YES
+#endif
 #include <opencv2/opencv.hpp>
 #pragma pop_macro("slots")
 #endif
@@ -45,107 +55,305 @@
 // Forward declaration from scoreboard-source.cpp
 void update_scoreboard_data(obs_data_t *data);
 
-// Helper function to capture a single frame from an OBS video source
-static QImage captureFrameFromOBSSource(obs_source_t* source) {
-	if (!source) return QImage();
-	
-	uint32_t width = obs_source_get_width(source);
-	uint32_t height = obs_source_get_height(source);
-	
-	if (width == 0 || height == 0) {
-		blog(LOG_WARNING, "Source has no dimensions: %dx%d", width, height);
-		return QImage();
-	}
-	
-	blog(LOG_INFO, "Attempting to capture frame from source: %dx%d", width, height);
-	
-	QImage frame;
-	
-	obs_enter_graphics();
-	
-	// Create a render texture
-	gs_texrender_t* texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
-	if (!texrender) {
-		blog(LOG_ERROR, "Failed to create texrender");
-		obs_leave_graphics();
-		return QImage();
-	}
-	
-	// Render the source to the texture
-	gs_texrender_reset(texrender);
-	if (gs_texrender_begin(texrender, width, height)) {
-		struct vec4 clear_color;
-		vec4_zero(&clear_color);
-		gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
-		
-		gs_ortho(0.0f, (float)width, 0.0f, (float)height, -100.0f, 100.0f);
-		
+// ── Frame capture via obs_enter_graphics ─────────────────────────────────────
+//
+// obs_enter_graphics() acquires OBS's graphics mutex, guaranteeing we are
+// between render frames (no active Metal/GL render encoder). This makes it
+// safe to call obs_source_video_render() and gs_stagesurface_map() from any
+// thread — including the Qt main thread and our own capture thread.
+//
+// Capture source → BGRA → RGBA bytes. Caller owns obs_enter_graphics context.
+static bool captureSourceToBytes(obs_source_t *source,
+                                  std::vector<uint8_t> &out,
+                                  uint32_t &outW, uint32_t &outH)
+{
+	uint32_t w = obs_source_get_width(source);
+	uint32_t h = obs_source_get_height(source);
+	if (w == 0 || h == 0) return false;
+
+	gs_texrender_t *tr = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+	if (!tr) return false;
+
+	bool ok = false;
+	gs_texrender_reset(tr);
+	if (gs_texrender_begin(tr, w, h)) {
+		struct vec4 clr; vec4_zero(&clr);
+		gs_clear(GS_CLEAR_COLOR, &clr, 0.0f, 0);
+		gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
 		obs_source_video_render(source);
-		
-		gs_texrender_end(texrender);
-		
-		// Get the texture
-		gs_texture_t* tex = gs_texrender_get_texture(texrender);
+		gs_texrender_end(tr);
+
+		gs_texture_t *tex = gs_texrender_get_texture(tr);
 		if (tex) {
-			// Create a staging surface to read pixels back to CPU
-			gs_stagesurf_t* stagesurf = gs_stagesurface_create(width, height, GS_BGRA);
-			if (stagesurf) {
-				// Copy texture to staging surface
-				gs_stage_texture(stagesurf, tex);
-				
-				// Map the staging surface to read pixels
-				uint8_t* data = nullptr;
-				uint32_t linesize = 0;
-				
-				if (gs_stagesurface_map(stagesurf, &data, &linesize)) {
-					// Create QImage from the pixel data
-					frame = QImage(width, height, QImage::Format_RGBA8888);
-					
-					// Copy pixel data line by line (handle different line sizes)
-					for (uint32_t y = 0; y < height; y++) {
-						uint8_t* src_line = data + (y * linesize);
-						uint8_t* dst_line = frame.scanLine(y);
-						
-						// Convert BGRA to RGBA
-						for (uint32_t x = 0; x < width; x++) {
-							uint8_t b = src_line[x * 4 + 0];
-							uint8_t g = src_line[x * 4 + 1];
-							uint8_t r = src_line[x * 4 + 2];
-							uint8_t a = src_line[x * 4 + 3];
-							
-							dst_line[x * 4 + 0] = r;
-							dst_line[x * 4 + 1] = g;
-							dst_line[x * 4 + 2] = b;
-							dst_line[x * 4 + 3] = a;
+			gs_stagesurf_t *ss = gs_stagesurface_create(w, h, GS_BGRA);
+			if (ss) {
+				gs_stage_texture(ss, tex);
+				uint8_t *ptr = nullptr; uint32_t ls = 0;
+				if (gs_stagesurface_map(ss, &ptr, &ls)) {
+					out.resize(w * h * 4);
+					for (uint32_t y = 0; y < h; y++) {
+						const uint8_t *src = ptr + y * ls;
+						uint8_t *dst = out.data() + y * w * 4;
+						for (uint32_t x = 0; x < w; x++) {
+							dst[x*4+0] = src[x*4+2]; // BGRA→RGBA
+							dst[x*4+1] = src[x*4+1];
+							dst[x*4+2] = src[x*4+0];
+							dst[x*4+3] = src[x*4+3];
 						}
 					}
-					
-					gs_stagesurface_unmap(stagesurf);
-					blog(LOG_INFO, "Successfully captured frame: %dx%d", width, height);
-				} else {
-					blog(LOG_ERROR, "Failed to map staging surface");
+					gs_stagesurface_unmap(ss);
+					outW = w; outH = h;
+					ok = true;
 				}
-				
-				gs_stagesurface_destroy(stagesurf);
-			} else {
-				blog(LOG_ERROR, "Failed to create staging surface");
+				gs_stagesurface_destroy(ss);
 			}
-		} else {
-			blog(LOG_ERROR, "Failed to get texture from texrender");
 		}
-	} else {
-		blog(LOG_ERROR, "Failed to begin texrender");
 	}
-	
-	gs_texrender_destroy(texrender);
-	obs_leave_graphics();
-	
-	if (frame.isNull()) {
-		blog(LOG_ERROR, "Frame capture resulted in null image");
-	}
-	
-	return frame;
+	gs_texrender_destroy(tr);
+	return ok;
 }
+
+// One-shot capture from any thread (e.g. Qt main thread for ROI selector).
+static QImage captureFrameFromOBSSource(obs_source_t *source) {
+	if (!source) return QImage();
+
+	std::vector<uint8_t> bytes;
+	uint32_t w = 0, h = 0;
+
+	obs_enter_graphics();
+	bool ok = captureSourceToBytes(source, bytes, w, h);
+	obs_leave_graphics();
+
+	if (!ok || bytes.empty()) return QImage();
+
+	// Build QImage on the calling thread (safe — no GPU work here)
+	QImage img(w, h, QImage::Format_RGBA8888);
+	memcpy(img.bits(), bytes.data(), bytes.size());
+	return img;
+}
+
+// ============================================================================
+// TeamColorEditorDialog — edit team colors and write back to teams.csv
+// ============================================================================
+class TeamColorEditorDialog : public QDialog {
+	Q_OBJECT
+
+signals:
+	// Emitted immediately after any color is changed so the scoreboard can update live.
+	void teamColorChanged(const QString& teamName,
+	                      const QColor& home_bg, const QColor& home_text,
+	                      const QColor& away_bg, const QColor& away_text);
+
+private:
+	struct TeamEntry {
+		QString name;
+		QColor home_bg, home_text, away_bg, away_text;
+	};
+
+	QComboBox*   teamCombo;
+	QPushButton* homeBgBtn;
+	QPushButton* homeTextBtn;
+	QPushButton* awayBgBtn;
+	QPushButton* awayTextBtn;
+	QLabel*      previewHome;
+	QLabel*      previewAway;
+
+	QString          csvPath;
+	QList<TeamEntry> teams;
+
+	// ---------- helpers ----------
+
+	static void setSwatchStyle(QPushButton* btn, const QColor& bg, const QColor& fg) {
+		btn->setText(bg.name().toUpper());
+		btn->setStyleSheet(
+			QString("QPushButton { background-color: %1; color: %2; padding: 4px 8px; }")
+			.arg(bg.name()).arg(fg.name()));
+	}
+
+	TeamEntry& current() { return teams[teamCombo->currentIndex()]; }
+
+	void loadCsv() {
+		QFile f(csvPath);
+		if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+		QTextStream in(&f);
+		in.readLine(); // header
+		while (!in.atEnd()) {
+			QString line = in.readLine().trimmed();
+			if (line.isEmpty()) continue;
+			QStringList p = line.split(',');
+			if (p.size() < 5) continue;
+			TeamEntry e;
+			e.name      = p[0].trimmed();
+			e.home_bg   = QColor(p[1].trimmed());
+			e.home_text = QColor(p[2].trimmed());
+			e.away_bg   = QColor(p[3].trimmed());
+			e.away_text = QColor(p[4].trimmed());
+			teams.append(e);
+		}
+	}
+
+	void saveCsv() {
+		QFile f(csvPath);
+		if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+			QMessageBox::critical(this, "Error",
+				QString("Could not write to %1").arg(csvPath));
+			return;
+		}
+		QTextStream out(&f);
+		out << "name,home_bg,home_text,away_bg,away_text\n";
+		for (const TeamEntry& e : teams) {
+			out << e.name << ","
+			    << e.home_bg.name().toUpper() << ","
+			    << e.home_text.name().toUpper() << ","
+			    << e.away_bg.name().toUpper() << ","
+			    << e.away_text.name().toUpper() << "\n";
+		}
+	}
+
+	void refreshSwatches() {
+		const TeamEntry& e = teams[teamCombo->currentIndex()];
+		setSwatchStyle(homeBgBtn,   e.home_bg,   e.home_text);
+		setSwatchStyle(homeTextBtn, e.home_text,  e.home_bg);
+		setSwatchStyle(awayBgBtn,   e.away_bg,   e.away_text);
+		setSwatchStyle(awayTextBtn, e.away_text,  e.away_bg);
+
+		previewHome->setStyleSheet(
+			QString("QLabel { background-color: %1; color: %2; padding: 8px; font-weight: bold; border-radius: 4px; }")
+			.arg(e.home_bg.name()).arg(e.home_text.name()));
+		previewHome->setText("HOME  " + e.name);
+
+		previewAway->setStyleSheet(
+			QString("QLabel { background-color: %1; color: %2; padding: 8px; font-weight: bold; border-radius: 4px; }")
+			.arg(e.away_bg.name()).arg(e.away_text.name()));
+		previewAway->setText("AWAY  " + e.name);
+	}
+
+	void pickColor(QColor& target, QPushButton* btn, const QString& title, bool isBg) {
+		QColor original = target;
+
+		QColorDialog dlg(target, this);
+		dlg.setWindowTitle(title);
+		// DontUseNativeDialog is required: the macOS native picker doesn't emit
+		// currentColorChanged while dragging, so live preview wouldn't work.
+		dlg.setOption(QColorDialog::DontUseNativeDialog);
+
+		auto applyColor = [&](const QColor& color) {
+			target = color;
+			QColor pair = isBg ? teams[teamCombo->currentIndex()].home_text
+			                   : teams[teamCombo->currentIndex()].home_bg;
+			setSwatchStyle(btn, target, pair);
+			refreshSwatches();
+			const TeamEntry& e = teams[teamCombo->currentIndex()];
+			emit teamColorChanged(e.name, e.home_bg, e.home_text, e.away_bg, e.away_text);
+		};
+
+		connect(&dlg, &QColorDialog::currentColorChanged, this, applyColor);
+
+		if (dlg.exec() != QDialog::Accepted) {
+			// Restore original color on cancel
+			applyColor(original);
+		}
+	}
+
+	void setupUI() {
+		setWindowTitle("Edit Team Colors");
+		setMinimumWidth(460);
+
+		QVBoxLayout* layout = new QVBoxLayout(this);
+
+		// --- Team selector ---
+		QHBoxLayout* row = new QHBoxLayout();
+		row->addWidget(new QLabel("Team:"));
+		teamCombo = new QComboBox();
+		for (const TeamEntry& e : teams)
+			teamCombo->addItem(e.name);
+		row->addWidget(teamCombo, 1);
+		layout->addLayout(row);
+
+		// --- Color grid ---
+		QGroupBox* colorBox = new QGroupBox("Colors");
+		QGridLayout* grid = new QGridLayout(colorBox);
+
+		auto makeLabel = [](const QString& txt) {
+			QLabel* l = new QLabel(txt);
+			l->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+			return l;
+		};
+
+		grid->addWidget(makeLabel("Home background:"), 0, 0);
+		homeBgBtn = new QPushButton(); homeBgBtn->setMinimumWidth(130);
+		grid->addWidget(homeBgBtn, 0, 1);
+
+		grid->addWidget(makeLabel("Home text:"), 1, 0);
+		homeTextBtn = new QPushButton(); homeTextBtn->setMinimumWidth(130);
+		grid->addWidget(homeTextBtn, 1, 1);
+
+		grid->addWidget(makeLabel("Away background:"), 2, 0);
+		awayBgBtn = new QPushButton(); awayBgBtn->setMinimumWidth(130);
+		grid->addWidget(awayBgBtn, 2, 1);
+
+		grid->addWidget(makeLabel("Away text:"), 3, 0);
+		awayTextBtn = new QPushButton(); awayTextBtn->setMinimumWidth(130);
+		grid->addWidget(awayTextBtn, 3, 1);
+
+		layout->addWidget(colorBox);
+
+		// --- Preview ---
+		QGroupBox* previewBox = new QGroupBox("Preview");
+		QVBoxLayout* pv = new QVBoxLayout(previewBox);
+		previewHome = new QLabel(); previewHome->setAlignment(Qt::AlignCenter); previewHome->setMinimumHeight(36);
+		previewAway = new QLabel(); previewAway->setAlignment(Qt::AlignCenter); previewAway->setMinimumHeight(36);
+		pv->addWidget(previewHome);
+		pv->addWidget(previewAway);
+		layout->addWidget(previewBox);
+
+		// --- Buttons ---
+		QHBoxLayout* btns = new QHBoxLayout();
+		btns->addStretch();
+		QPushButton* saveBtn = new QPushButton("Save to CSV");
+		saveBtn->setStyleSheet("QPushButton { background-color: #2d7a2d; color: white; padding: 6px 16px; font-weight: bold; }");
+		QPushButton* cancelBtn = new QPushButton("Cancel");
+		cancelBtn->setStyleSheet("QPushButton { padding: 6px 16px; }");
+		btns->addWidget(saveBtn);
+		btns->addWidget(cancelBtn);
+		layout->addLayout(btns);
+
+		// --- Connections ---
+		connect(teamCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+		        this, [this]{ refreshSwatches(); });
+
+		connect(homeBgBtn, &QPushButton::clicked, this, [this]{
+			pickColor(current().home_bg, homeBgBtn, "Home Background Color", true);
+		});
+		connect(homeTextBtn, &QPushButton::clicked, this, [this]{
+			pickColor(current().home_text, homeTextBtn, "Home Text Color", false);
+		});
+		connect(awayBgBtn, &QPushButton::clicked, this, [this]{
+			pickColor(current().away_bg, awayBgBtn, "Away Background Color", true);
+		});
+		connect(awayTextBtn, &QPushButton::clicked, this, [this]{
+			pickColor(current().away_text, awayTextBtn, "Away Text Color", false);
+		});
+
+		connect(saveBtn, &QPushButton::clicked, this, [this]{
+			saveCsv();
+			accept();
+		});
+		connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
+
+		if (!teams.isEmpty()) refreshSwatches();
+	}
+
+public:
+	explicit TeamColorEditorDialog(const QString& csvPath, QWidget* parent = nullptr)
+		: QDialog(parent), csvPath(csvPath)
+	{
+		loadCsv();
+		setupUI();
+	}
+};
+
+// ============================================================================
 
 class ScoreboardControlPanel : public QWidget {
 	Q_OBJECT
@@ -163,6 +371,8 @@ private:
 	QSpinBox *shotClockSpin;
 	QSpinBox *gameMinutesSpin;
 	QSpinBox *gameSecondsSpin;
+	QSpinBox *defaultQuarterMinutesSpin;
+	QSpinBox *defaultQuarterSecondsSpin;
 	
 	// Period
 	QSpinBox *periodSpin;
@@ -187,6 +397,7 @@ private:
 	QTimer *shotClockTimer;
 	bool gameClockRunning;
 	bool shotClockRunning;
+	bool clockSyncGuard = false; // prevents re-entrancy when syncing clocks
 	QPushButton *startGameClockBtn;
 	QPushButton *stopGameClockBtn;
 	QPushButton *startShotClockBtn;
@@ -201,6 +412,7 @@ private:
 	// Colors
 	QPushButton *homeColorBtn;
 	QPushButton *awayColorBtn;
+	QPushButton *editTeamColorsBtn;
 	uint32_t homeColor;
 	uint32_t awayColor;
 	uint32_t homeTextColor;
@@ -241,6 +453,36 @@ private:
 	QString shotClockSourceName;
 	QString gameClockSourceName;
 	bool detectionRunning;
+	// Raw video callback stores CPU-side RGBA frames (no GPU ops needed).
+	// OBS pushes frames on its video output thread; Qt timer reads them.
+	std::mutex             rawVideoMutex;
+	std::vector<uint8_t>   rawVideoBytes; // RGBA8888
+	uint32_t               rawVideoW = 0, rawVideoH = 0;
+
+	// --- Clock sync state ---
+	static constexpr int kPauseFrameThreshold = 20; // ~2 s at 10 Hz OCR
+	int  shotOCRLast    = -1;
+	int  shotOCRSameRun = 0;
+	bool shotOCRPaused  = false;
+	int  gameOCRLast    = -1; // total seconds
+	int  gameOCRSameRun = 0;
+	bool gameOCRPaused  = false;
+
+	// Sync mode:
+	//   0 = Event-based  — trust 1 s timer during play, sync only on stop/start
+	//   1 = Rate-based   — 50 ms internal timer, adjust tick rate to converge to OCR
+	int          clockSyncMode   = 0;
+	QComboBox   *clockSyncModeCombo = nullptr;
+
+	// Rate-based sync: high-frequency timers + float clocks
+	QTimer      *shotRateTimer   = nullptr;
+	QTimer      *gameRateTimer   = nullptr;
+	double       shotClockMs     = 0.0;  // milliseconds remaining
+	double       gameClockMs     = 0.0;
+	double       shotClockRate   = 1.0;  // 1.0 = real-time
+	double       gameClockRate   = 1.0;
+	static constexpr double kRateConvergenceMs = 4000.0; // converge over ~4 s
+	static constexpr int    kRateTickMs        = 50;     // 50 ms = 20 Hz
 #endif
 	
 	// Team color configurations loaded from teams.csv
@@ -253,6 +495,243 @@ private:
 	QMap<QString, TeamColors> teamColorMap;
 
 public:
+	Q_INVOKABLE void nextGame() {
+		int cur = gameSelectCombo->currentIndex();
+		if (cur > 0 && cur < gameSelectCombo->count() - 1)
+			gameSelectCombo->setCurrentIndex(cur + 1);
+	}
+
+	Q_INVOKABLE void prevGame() {
+		int cur = gameSelectCombo->currentIndex();
+		if (cur > 1)
+			gameSelectCombo->setCurrentIndex(cur - 1);
+	}
+
+	// ── Remote API (called by WebSocket handler, always on Qt main thread) ───
+
+	QJsonObject getScheduleJson() {
+		QJsonArray games;
+		if (configDir.isEmpty()) {
+			QJsonObject r; r["error"] = "No schedule loaded"; return r;
+		}
+		QFile file(configDir + "/schedule.csv");
+		if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+			QJsonObject r; r["error"] = "Could not open schedule.csv"; return r;
+		}
+		QTextStream in(&file);
+		in.readLine(); // skip header
+		int index = 0;
+		while (!in.atEnd()) {
+			QString line = in.readLine().trimmed();
+			if (line.isEmpty()) { index++; continue; }
+			QStringList p = line.split(',');
+			QJsonObject g;
+			g["index"]      = index++;
+			g["start_time"] = p.value(0).trimmed();
+			g["home"]       = p.value(1).trimmed();
+			g["away"]       = p.value(2).trimmed();
+			QString hs = p.value(3).trimmed(), as_ = p.value(4).trimmed();
+			g["home_score"] = hs.isEmpty()  ? QJsonValue(QJsonValue::Null) : QJsonValue(hs.toInt());
+			g["away_score"] = as_.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(as_.toInt());
+			g["winner"]     = p.value(5).trimmed();
+			games.append(g);
+		}
+		QJsonObject result;
+		result["games"] = games;
+		return result;
+	}
+
+	void setGameScoreAtIndex(int gameIndex, int homeScore, int awayScore, const QString &winner) {
+		if (configDir.isEmpty()) return;
+		QString schedulePath = configDir + "/schedule.csv";
+		QFile file(schedulePath);
+		if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+
+		QStringList lines;
+		QTextStream in(&file);
+		QString header = in.readLine();
+		if (!header.split(',').contains("home_score"))
+			header += ",home_score,away_score,winner";
+		lines.append(header);
+
+		int idx = 0;
+		while (!in.atEnd()) {
+			QString line = in.readLine();
+			if (line.trimmed().isEmpty()) { lines.append(line); continue; }
+			QStringList p = line.split(',');
+			if (idx == gameIndex && p.size() >= 3) {
+				lines.append(p.value(0).trimmed() + "," + p.value(1).trimmed() + "," +
+				             p.value(2).trimmed() + "," + QString::number(homeScore) +
+				             "," + QString::number(awayScore) + "," + winner);
+			} else {
+				lines.append(line);
+			}
+			idx++;
+		}
+		file.close();
+
+		QFile out(schedulePath);
+		if (!out.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+		QTextStream outStream(&out);
+		for (const QString &l : lines) outStream << l << "\n";
+		out.close();
+
+		update_global_schedule_data(configDir.toUtf8().constData());
+		notify_schedule_data_updated();
+	}
+
+	QJsonObject getSettingsJson() {
+		QJsonObject s;
+		s["show_game_clock"]         = showGameClockCheck->isChecked();
+		s["show_shot_clock"]         = showShotClockCheck->isChecked();
+		s["default_quarter_minutes"] = defaultQuarterMinutesSpin->value();
+		s["default_quarter_seconds"] = defaultQuarterSecondsSpin->value();
+		s["smoothing_frames"]        = smoothingFramesSpinBox->value();
+		s["shot_clock_model_path"]   = shotClockModelEdit->text();
+		s["game_clock_model_path"]   = gameClockModelEdit->text();
+		s["config_dir"]              = configDir;
+#ifdef USE_CNN_OCR
+		s["clock_sync_mode"]         = clockSyncMode;
+		s["shot_clock_matrix_path"]  = shotClockMatrixEdit->text();
+		s["game_clock_matrix_path"]  = gameClockMatrixEdit->text();
+		s["cnn_available"]           = true;
+#else
+		s["cnn_available"]           = false;
+#endif
+		return s;
+	}
+
+	void applySettingsJson(const QJsonObject &s) {
+		if (s.contains("show_game_clock"))
+			showGameClockCheck->setChecked(s["show_game_clock"].toBool());
+		if (s.contains("show_shot_clock"))
+			showShotClockCheck->setChecked(s["show_shot_clock"].toBool());
+		if (s.contains("default_quarter_minutes"))
+			defaultQuarterMinutesSpin->setValue(s["default_quarter_minutes"].toInt());
+		if (s.contains("default_quarter_seconds"))
+			defaultQuarterSecondsSpin->setValue(s["default_quarter_seconds"].toInt());
+		if (s.contains("smoothing_frames"))
+			smoothingFramesSpinBox->setValue(s["smoothing_frames"].toInt());
+#ifdef USE_CNN_OCR
+		if (s.contains("clock_sync_mode"))
+			clockSyncModeCombo->setCurrentIndex(s["clock_sync_mode"].toInt());
+#endif
+	}
+
+	QJsonObject getRoisJson() {
+		QJsonObject result;
+#ifdef USE_CNN_OCR
+		if (ocrEngine) {
+			auto shot = ocrEngine->getShotClockROI();
+			auto game = ocrEngine->getGameClockROI();
+			QJsonObject so; so["x"] = shot.x; so["y"] = shot.y; so["width"] = shot.width; so["height"] = shot.height;
+			QJsonObject go; go["x"] = game.x; go["y"] = game.y; go["width"] = game.width; go["height"] = game.height;
+			result["shot_clock"] = so;
+			result["game_clock"] = go;
+		}
+#endif
+		QSettings rs("WaterPoloScoreboard", "CNNModels");
+		result["shot_clock_source"] = rs.value("shotClockROI_source", "").toString();
+		result["game_clock_source"] = rs.value("gameClockROI_source", "").toString();
+		return result;
+	}
+
+	// Sync all UI spinboxes/edits from g_scoreboard without triggering
+	// updateScoreboard() — call this after a WebSocket update so the clock
+	// timers don't overwrite the new values on their next tick.
+	Q_INVOKABLE void syncUIFromState() {
+		struct scoreboard_source *sb = get_global_scoreboard();
+		if (!sb) return;
+		QSignalBlocker b1(homeScoreSpin), b2(awayScoreSpin);
+		QSignalBlocker b3(homeExclusionsSpin), b4(awayExclusionsSpin);
+		QSignalBlocker b5(homeTimeoutsSpin), b6(awayTimeoutsSpin);
+		QSignalBlocker b7(gameMinutesSpin), b8(gameSecondsSpin);
+		QSignalBlocker b9(shotClockSpin);
+		QSignalBlocker b10(homeTeamEdit), b11(awayTeamEdit);
+		homeScoreSpin->setValue(sb->home_score);
+		awayScoreSpin->setValue(sb->away_score);
+		homeExclusionsSpin->setValue(sb->home_exclusions);
+		awayExclusionsSpin->setValue(sb->away_exclusions);
+		homeTimeoutsSpin->setValue(sb->home_timeouts);
+		awayTimeoutsSpin->setValue(sb->away_timeouts);
+		gameMinutesSpin->setValue(sb->game_clock_minutes);
+		gameSecondsSpin->setValue(sb->game_clock_seconds);
+		shotClockSpin->setValue(sb->shot_clock);
+		homeTeamEdit->setText(QString::fromStdString(sb->home_team));
+		awayTeamEdit->setText(QString::fromStdString(sb->away_team));
+	}
+
+	void setRoiData(const QString &clock, int x, int y, int w, int h) {
+#ifdef USE_CNN_OCR
+		if (!ocrEngine) return;
+		QSettings rs("WaterPoloScoreboard", "CNNModels");
+		if (clock == "shot") {
+			ocrEngine->setShotClockROI(x, y, w, h);
+			rs.setValue("shotClockROI_x", x); rs.setValue("shotClockROI_y", y);
+			rs.setValue("shotClockROI_width", w); rs.setValue("shotClockROI_height", h);
+		} else {
+			ocrEngine->setGameClockROI(x, y, w, h);
+			rs.setValue("gameClockROI_x", x); rs.setValue("gameClockROI_y", y);
+			rs.setValue("gameClockROI_width", w); rs.setValue("gameClockROI_height", h);
+		}
+#else
+		(void)clock; (void)x; (void)y; (void)w; (void)h;
+#endif
+	}
+
+	QJsonArray getTeamsJson() {
+		QJsonArray teams;
+		if (configDir.isEmpty()) return teams;
+		QFile file(configDir + "/teams.csv");
+		if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return teams;
+		QTextStream in(&file);
+		in.readLine(); // header
+		while (!in.atEnd()) {
+			QString line = in.readLine().trimmed();
+			if (line.isEmpty()) continue;
+			QStringList p = line.split(',');
+			if (p.size() >= 5) {
+				QJsonObject t;
+				t["name"]      = p[0].trimmed();
+				t["home_bg"]   = p[1].trimmed();
+				t["home_text"] = p[2].trimmed();
+				t["away_bg"]   = p[3].trimmed();
+				t["away_text"] = p[4].trimmed();
+				teams.append(t);
+			}
+		}
+		return teams;
+	}
+
+	void setTeamColorData(const QString &name, const QString &homeBg, const QString &homeText,
+	                      const QString &awayBg, const QString &awayText) {
+		if (configDir.isEmpty()) return;
+		QString teamsPath = configDir + "/teams.csv";
+		QFile file(teamsPath);
+		if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+		QStringList lines;
+		QTextStream in(&file);
+		lines.append(in.readLine()); // header
+		while (!in.atEnd()) {
+			QString line = in.readLine().trimmed();
+			if (line.isEmpty()) continue;
+			QStringList p = line.split(',');
+			if (!p.isEmpty() && p[0].trimmed() == name)
+				lines.append(name + "," + homeBg + "," + homeText + "," + awayBg + "," + awayText);
+			else
+				lines.append(line);
+		}
+		file.close();
+		QFile out(teamsPath);
+		if (!out.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+		QTextStream outStream(&out);
+		for (const QString &l : lines) outStream << l << "\n";
+		out.close();
+		loadTeamColors(teamsPath);
+		update_global_schedule_data(configDir.toUtf8().constData());
+		notify_schedule_data_updated();
+	}
+
 	ScoreboardControlPanel(QWidget *parent = nullptr) : QWidget(parent) {
 		setWindowTitle("Water Polo Scoreboard Control");
 		setMinimumWidth(500);
@@ -273,6 +752,27 @@ public:
 		shotClockVideoSource = nullptr;
 		gameClockVideoSource = nullptr;
 		detectionRunning = false;
+
+		// Restore source names and ROIs from previous session
+		{
+			QSettings roiSettings("WaterPoloScoreboard", "CNNModels");
+			shotClockSourceName = roiSettings.value("shotClockROI_source", "").toString();
+			gameClockSourceName = roiSettings.value("gameClockROI_source", "").toString();
+
+			int sx = roiSettings.value("shotClockROI_x", 0).toInt();
+			int sy = roiSettings.value("shotClockROI_y", 0).toInt();
+			int sw = roiSettings.value("shotClockROI_width", 0).toInt();
+			int sh = roiSettings.value("shotClockROI_height", 0).toInt();
+			if (sw > 0 && sh > 0)
+				ocrEngine->setShotClockROI(sx, sy, sw, sh);
+
+			int gx = roiSettings.value("gameClockROI_x", 0).toInt();
+			int gy = roiSettings.value("gameClockROI_y", 0).toInt();
+			int gw = roiSettings.value("gameClockROI_width", 0).toInt();
+			int gh = roiSettings.value("gameClockROI_height", 0).toInt();
+			if (gw > 0 && gh > 0)
+				ocrEngine->setGameClockROI(gx, gy, gw, gh);
+		}
 #endif
 		
 		// Load saved config directory
@@ -386,6 +886,17 @@ public:
 		stopDetectionBtn->setEnabled(false);
 		stopDetectionBtn->setStyleSheet("QPushButton { background-color: #cc0000; color: white; font-weight: bold; }");
 		modelsLayout->addWidget(stopDetectionBtn, 9, 0, 1, 3);
+
+		modelsLayout->addWidget(new QLabel("Sync Mode:"), 10, 0);
+		clockSyncModeCombo = new QComboBox();
+		clockSyncModeCombo->addItem("Event-based (stop/start sync)", 0);
+		clockSyncModeCombo->addItem("Rate-based (sub-second smear)", 1);
+		{
+			QSettings s("WaterPoloScoreboard", "CNNModels");
+			clockSyncMode = s.value("clockSyncMode", 0).toInt();
+			clockSyncModeCombo->setCurrentIndex(clockSyncMode);
+		}
+		modelsLayout->addWidget(clockSyncModeCombo, 10, 1, 1, 2);
 #endif
 		
 		modelsGroup->setLayout(modelsLayout);
@@ -410,7 +921,11 @@ public:
 		awayColorBtn = new QPushButton("Away Color");
 		awayColorBtn->setStyleSheet("background-color: #FF8000;");
 		teamsLayout->addWidget(awayColorBtn, 1, 2);
-		
+
+		editTeamColorsBtn = new QPushButton("Edit Team Colors...");
+		editTeamColorsBtn->setStyleSheet("QPushButton { padding: 4px 8px; }");
+		teamsLayout->addWidget(editTeamColorsBtn, 2, 0, 1, 3);
+
 		teamsGroup->setLayout(teamsLayout);
 		mainLayout->addWidget(teamsGroup);
 		
@@ -451,25 +966,45 @@ public:
 		QGroupBox *gameClockGroup = new QGroupBox("Game Clock");
 		QGridLayout *gameClockLayout = new QGridLayout();
 		
-		gameClockLayout->addWidget(new QLabel("Minutes:"), 0, 0);
+		// Default quarter time row
+		QLabel *defaultTimeLabel = new QLabel("Default:");
+		defaultTimeLabel->setStyleSheet("QLabel { color: #aaa; }");
+		gameClockLayout->addWidget(defaultTimeLabel, 0, 0);
+
+		defaultQuarterMinutesSpin = new QSpinBox();
+		defaultQuarterMinutesSpin->setRange(0, 99);
+		defaultQuarterMinutesSpin->setValue(8);
+		defaultQuarterMinutesSpin->setSuffix("m");
+		defaultQuarterMinutesSpin->setToolTip("Default quarter length (minutes)");
+		gameClockLayout->addWidget(defaultQuarterMinutesSpin, 0, 1);
+
+		defaultQuarterSecondsSpin = new QSpinBox();
+		defaultQuarterSecondsSpin->setRange(0, 59);
+		defaultQuarterSecondsSpin->setValue(0);
+		defaultQuarterSecondsSpin->setSuffix("s");
+		defaultQuarterSecondsSpin->setToolTip("Default quarter length (seconds)");
+		gameClockLayout->addWidget(defaultQuarterSecondsSpin, 0, 2);
+
+		// Current clock time row
+		gameClockLayout->addWidget(new QLabel("Time:"), 1, 0);
 		gameMinutesSpin = new QSpinBox();
-		gameMinutesSpin->setRange(0, 8);
+		gameMinutesSpin->setRange(0, 99);
 		gameMinutesSpin->setValue(8);
-		gameClockLayout->addWidget(gameMinutesSpin, 0, 1);
-		
-		gameClockLayout->addWidget(new QLabel("Seconds:"), 0, 2);
+		gameClockLayout->addWidget(gameMinutesSpin, 1, 1);
+
+		gameClockLayout->addWidget(new QLabel(":"), 1, 2, Qt::AlignCenter);
 		gameSecondsSpin = new QSpinBox();
 		gameSecondsSpin->setRange(0, 59);
 		gameSecondsSpin->setValue(0);
-		gameClockLayout->addWidget(gameSecondsSpin, 0, 3);
-		
+		gameClockLayout->addWidget(gameSecondsSpin, 1, 3);
+
 		startGameClockBtn = new QPushButton("Start");
 		stopGameClockBtn = new QPushButton("Stop");
 		QPushButton *resetGameClockBtn = new QPushButton("Reset");
-		
-		gameClockLayout->addWidget(startGameClockBtn, 1, 0);
-		gameClockLayout->addWidget(stopGameClockBtn, 1, 1);
-		gameClockLayout->addWidget(resetGameClockBtn, 1, 2);
+
+		gameClockLayout->addWidget(startGameClockBtn, 2, 0);
+		gameClockLayout->addWidget(stopGameClockBtn, 2, 1);
+		gameClockLayout->addWidget(resetGameClockBtn, 2, 2);
 		
 		gameClockGroup->setLayout(gameClockLayout);
 		mainLayout->addWidget(gameClockGroup);
@@ -609,8 +1144,8 @@ public:
 		connect(startGameClockBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::startGameClock);
 		connect(stopGameClockBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::stopGameClock);
 		connect(resetGameClockBtn, &QPushButton::clicked, [this]() {
-			gameMinutesSpin->setValue(8);
-			gameSecondsSpin->setValue(0);
+			gameMinutesSpin->setValue(defaultQuarterMinutesSpin->value());
+			gameSecondsSpin->setValue(defaultQuarterSecondsSpin->value());
 			updateScoreboard();
 		});
 		
@@ -650,6 +1185,36 @@ public:
 		connect(gameSelectCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ScoreboardControlPanel::onGameSelected);
 		connect(homeColorBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::chooseHomeColor);
 		connect(awayColorBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::chooseAwayColor);
+		connect(editTeamColorsBtn, &QPushButton::clicked, this, [this]() {
+			if (configDir.isEmpty()) {
+				QMessageBox::warning(this, "No Directory Loaded",
+					"Please load a schedule directory first so the teams.csv path is known.");
+				return;
+			}
+			TeamColorEditorDialog dlg(configDir + "/teams.csv", this);
+			connect(&dlg, &TeamColorEditorDialog::teamColorChanged, this,
+				[this](const QString& team, const QColor& hBg, const QColor& hText,
+				       const QColor& aBg, const QColor& aText) {
+					bool changed = false;
+					if (homeTeamEdit->text().trimmed() == team) {
+						homeColor     = 0xFF000000 | (hBg.red()   << 16) | (hBg.green()   << 8) | hBg.blue();
+						homeTextColor = 0xFF000000 | (hText.red() << 16) | (hText.green() << 8) | hText.blue();
+						changed = true;
+					}
+					if (awayTeamEdit->text().trimmed() == team) {
+						awayColor     = 0xFF000000 | (aBg.red()   << 16) | (aBg.green()   << 8) | aBg.blue();
+						awayTextColor = 0xFF000000 | (aText.red() << 16) | (aText.green() << 8) | aText.blue();
+						changed = true;
+					}
+					if (changed) {
+						updateColorButtons();
+						updateScoreboard();
+					}
+				});
+			if (dlg.exec() == QDialog::Accepted) {
+				loadTeamColors(configDir + "/teams.csv");
+			}
+		});
 		
 		// CNN model connections
 		connect(browseShotModelBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::browseShotClockModel);
@@ -690,27 +1255,51 @@ public:
 #ifdef USE_CNN_OCR
 		connect(startDetectionBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::startClockDetection);
 		connect(stopDetectionBtn, &QPushButton::clicked, this, &ScoreboardControlPanel::stopClockDetection);
+		connect(clockSyncModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
+			clockSyncMode = idx;
+			QSettings s("WaterPoloScoreboard", "CNNModels");
+			s.setValue("clockSyncMode", clockSyncMode);
+		});
+
+		// Rate-based timers (only active when sync mode = 1 and clock is running)
+		shotRateTimer = new QTimer(this);
+		shotRateTimer->setInterval(kRateTickMs);
+		connect(shotRateTimer, &QTimer::timeout, this, &ScoreboardControlPanel::onShotClockRateTick);
+		gameRateTimer = new QTimer(this);
+		gameRateTimer->setInterval(kRateTickMs);
+		connect(gameRateTimer, &QTimer::timeout, this, &ScoreboardControlPanel::onGameClockRateTick);
+
+		// Enable start button if ROIs + sources were already saved in a previous session
+		checkEnableDetection();
 #endif
-		
-		// Initialize models directory path using environment variable
-		QString appData = QString::fromLocal8Bit(qgetenv("APPDATA"));
-		if (!appData.isEmpty()) {
-			modelsDir = appData + "/obs-studio/plugin_config/obs-scoreboard/models";
-			QDir dir(modelsDir);
-			if (!dir.exists()) {
-				dir.mkpath(".");
+
+		// Initialize models directory: prefer configDir, fall back to APPDATA (Windows)
+		if (!configDir.isEmpty()) {
+			modelsDir = configDir;
+		} else {
+			QString appData = QString::fromLocal8Bit(qgetenv("APPDATA"));
+			if (!appData.isEmpty()) {
+				modelsDir = appData + "/obs-studio/plugin_config/obs-scoreboard/models";
+				QDir dir(modelsDir);
+				if (!dir.exists()) {
+					dir.mkpath(".");
+				}
 			}
-			
-			// Load saved model paths
+		}
+
+		{
+			// Load saved model paths, defaulting to models in the config/models dir
 			QSettings modelSettings("WaterPoloScoreboard", "CNNModels");
-			QString shotModelPath = modelSettings.value("shotClockModel", modelsDir + "/shot_clock_model.pt").toString();
-			QString gameModelPath = modelSettings.value("gameClockModel", modelsDir + "/game_clock_model.pt").toString();
+			QString defaultShotModel = modelsDir.isEmpty() ? "shot_clock_model.pt" : modelsDir + "/shot_clock_model.pt";
+			QString defaultGameModel = modelsDir.isEmpty() ? "game_clock_model.pt" : modelsDir + "/game_clock_model.pt";
+			QString shotModelPath = modelSettings.value("shotClockModel", defaultShotModel).toString();
+			QString gameModelPath = modelSettings.value("gameClockModel", defaultGameModel).toString();
 			QString shotMatrixPath = modelSettings.value("shotClockMatrix", "").toString();
 			QString gameMatrixPath = modelSettings.value("gameClockMatrix", "").toString();
-			
+
 			shotClockModelEdit->setText(shotModelPath);
 			gameClockModelEdit->setText(gameModelPath);
-			
+
 			if (!shotMatrixPath.isEmpty()) {
 				shotClockMatrixEdit->setText(shotMatrixPath);
 			}
@@ -838,101 +1427,168 @@ private slots:
 	void startGameClock() {
 		if (!gameClockRunning) {
 			gameClockRunning = true;
-			gameClockTimer->start();
+#ifdef USE_CNN_OCR
+			if (clockSyncMode == 1 && gameRateTimer) {
+				gameClockMs   = (gameMinutesSpin->value() * 60 + gameSecondsSpin->value()) * 1000.0;
+				gameClockRate = 1.0;
+				gameRateTimer->start();
+			} else {
+#endif
+				gameClockTimer->start();
+#ifdef USE_CNN_OCR
+			}
+#endif
 			startGameClockBtn->setEnabled(false);
 			stopGameClockBtn->setEnabled(true);
+			// Keep shot clock in sync
+			if (!clockSyncGuard) { clockSyncGuard = true; startShotClock(); clockSyncGuard = false; }
 		}
 	}
-	
+
 	void stopGameClock() {
 		if (gameClockRunning) {
 			gameClockRunning = false;
 			gameClockTimer->stop();
+#ifdef USE_CNN_OCR
+			if (gameRateTimer) gameRateTimer->stop();
+#endif
 			startGameClockBtn->setEnabled(true);
 			stopGameClockBtn->setEnabled(false);
+			// Keep shot clock in sync
+			if (!clockSyncGuard) { clockSyncGuard = true; stopShotClock(); clockSyncGuard = false; }
 		}
 	}
-	
+
 	void startShotClock() {
 		if (!shotClockRunning) {
 			shotClockRunning = true;
-			shotClockTimer->start();
+#ifdef USE_CNN_OCR
+			if (clockSyncMode == 1 && shotRateTimer) {
+				shotClockMs   = shotClockSpin->value() * 1000.0;
+				shotClockRate = 1.0;
+				shotRateTimer->start();
+			} else {
+#endif
+				shotClockTimer->start();
+#ifdef USE_CNN_OCR
+			}
+#endif
 			startShotClockBtn->setEnabled(false);
 			stopShotClockBtn->setEnabled(true);
+			// Keep game clock in sync
+			if (!clockSyncGuard) { clockSyncGuard = true; startGameClock(); clockSyncGuard = false; }
 		}
 	}
-	
+
 	void stopShotClock() {
 		if (shotClockRunning) {
 			shotClockRunning = false;
 			shotClockTimer->stop();
+#ifdef USE_CNN_OCR
+			if (shotRateTimer) shotRateTimer->stop();
+#endif
 			startShotClockBtn->setEnabled(true);
 			stopShotClockBtn->setEnabled(false);
+			// Keep game clock in sync
+			if (!clockSyncGuard) { clockSyncGuard = true; stopGameClock(); clockSyncGuard = false; }
 		}
 	}
 	
 	void onGameClockTick() {
-		int minutes = gameMinutesSpin->value();
-		int seconds = gameSecondsSpin->value();
-		
-		if (seconds == 0) {
-			if (minutes == 0) {
-				// Clock expired
-				stopGameClock();
-				return;
-			}
-			minutes--;
-			seconds = 59;
-		} else {
-			seconds--;
+		int total = gameMinutesSpin->value() * 60 + gameSecondsSpin->value();
+		if (total <= 0) { stopGameClock(); return; }
+		total--;
+		if (total <= 0) {
+			gameMinutesSpin->setValue(0);
+			gameSecondsSpin->setValue(0);
+			stopGameClock();
+			return;
 		}
-		
-		gameMinutesSpin->setValue(minutes);
-		gameSecondsSpin->setValue(seconds);
+		gameMinutesSpin->setValue(total / 60);
+		gameSecondsSpin->setValue(total % 60);
 		updateScoreboard();
 	}
 	
 	void onShotClockTick() {
-		int shotClock = shotClockSpin->value();
-		
-		if (shotClock <= 0) {
-			stopShotClock();
-			return;
-		}
-		
-		shotClockSpin->setValue(shotClock - 1);
+		int v = shotClockSpin->value();
+		if (v <= 0) { stopShotClock(); return; }
+		v--;
+		if (v <= 0) { shotClockSpin->setValue(0); stopShotClock(); return; }
+		shotClockSpin->setValue(v);
 		updateScoreboard();
 	}
-	
+
+#ifdef USE_CNN_OCR
+	// Rate-based tick: fires every 50 ms, advances clock at shotClockRate speed.
+	// The displayed integer only changes when the floor crosses a second boundary,
+	// so the viewer always sees clean 1-second decrements regardless of the rate.
+	void onShotClockRateTick() {
+		shotClockMs -= kRateTickMs * shotClockRate;
+		if (shotClockMs <= 0.0) {
+			shotClockSpin->setValue(0);
+			stopShotClock();
+			updateScoreboard();
+			return;
+		}
+		int display = (int)(shotClockMs / 1000.0);
+		if (display != shotClockSpin->value()) {
+			shotClockSpin->setValue(display);
+			updateScoreboard();
+		}
+	}
+
+	void onGameClockRateTick() {
+		gameClockMs -= kRateTickMs * gameClockRate;
+		if (gameClockMs <= 0.0) {
+			gameMinutesSpin->setValue(0);
+			gameSecondsSpin->setValue(0);
+			stopGameClock();
+			updateScoreboard();
+			return;
+		}
+		int total   = (int)(gameClockMs / 1000.0);
+		int display_m = total / 60;
+		int display_s = total % 60;
+		if (display_m != gameMinutesSpin->value() || display_s != gameSecondsSpin->value()) {
+			gameMinutesSpin->setValue(display_m);
+			gameSecondsSpin->setValue(display_s);
+			updateScoreboard();
+		}
+	}
+#endif
+
 	void loadSchedule() {
-		QString dir = QFileDialog::getExistingDirectory(this, "Select Configuration Directory", configDir);
-		if (dir.isEmpty()) return;
-		
-		configDir = dir;
-		
-		// Save config directory to settings
+		QString startDir = configDir.isEmpty() ? QDir::homePath() : configDir;
+		QString csvPath = QFileDialog::getOpenFileName(
+			this, "Select Schedule CSV", startDir,
+			"Schedule files (*.csv);;All files (*)");
+		if (csvPath.isEmpty()) return;
+
+		// configDir is the folder containing the CSV — logos and teams.csv live here
+		configDir = QFileInfo(csvPath).absolutePath();
+
 		QSettings settings("WaterPoloScoreboard", "ControlPanel");
 		settings.setValue("configDir", configDir);
-		
-		loadScheduleFromPath(configDir);
+
+		loadScheduleFromPath(configDir, csvPath);
 	}
-	
-	void loadScheduleFromPath(const QString &dir) {
+
+	void loadScheduleFromPath(const QString &dir, const QString &csvPath = QString()) {
 		if (dir.isEmpty()) return;
-		
+
+		// Resolve which CSV file to use
+		QString schedulePath = csvPath.isEmpty() ? dir + "/schedule.csv" : csvPath;
+
 		// Load teams.csv first
 		loadTeamColors(dir + "/teams.csv");
-		
+
 		// Update global schedule data (shared with schedule source)
 		std::string config_dir = dir.toUtf8().constData();
 		update_global_schedule_data(config_dir);
-		
-		// Then load schedule.csv into the combo box for UI
-		QString schedulePath = dir + "/schedule.csv";
-		
+
 		QFile file(schedulePath);
 		if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-			blog(LOG_WARNING, "Could not open schedule.csv at %s", schedulePath.toUtf8().constData());
+			blog(LOG_WARNING, "Could not open schedule at %s", schedulePath.toUtf8().constData());
 			return;
 		}
 		
@@ -966,15 +1622,10 @@ private slots:
 			}
 		}
 		
-		file.close();
 		blog(LOG_INFO, "Loaded schedule from %s", schedulePath.toUtf8().constData());
-		
-		// Notify schedule sources that data has been updated
 		notify_schedule_data_updated();
-		
-		// Auto-select the first game if available
+
 		if (gameSelectCombo->count() > 1) {
-			blog(LOG_INFO, "Auto-selecting first game (index 1)");
 			gameSelectCombo->setCurrentIndex(1);
 			// Force an update in case the signal doesn't fire
 			onGameSelected(1);
@@ -1030,8 +1681,7 @@ private slots:
 			}
 		}
 		
-		file.close();
-		blog(LOG_INFO, "Loaded %d team color configurations from %s", 
+		blog(LOG_INFO, "Loaded %d team color configurations from %s",
 		     teamColorMap.size(), teamsPath.toUtf8().constData());
 	}
 	
@@ -1373,61 +2023,63 @@ private slots:
 	
 	void loadCNNModels() {
 #ifdef USE_CNN_OCR
-		QString shotModel = shotClockModelEdit->text();
-		QString gameModel = gameClockModelEdit->text();
-		
-		bool shotOk = false, gameOk = false;
-		QString message;
-		
-		if (!shotModel.isEmpty() && QFile::exists(shotModel)) {
-			shotOk = ocrEngine->loadShotClockModel(shotModel.toStdString());
-			if (shotOk) {
-				blog(LOG_INFO, "Shot clock model loaded successfully: %s", shotModel.toUtf8().constData());
-			} else {
-				blog(LOG_ERROR, "Failed to load shot clock model: %s", shotModel.toUtf8().constData());
-			}
-		}
-		
-		if (!gameModel.isEmpty() && QFile::exists(gameModel)) {
-			gameOk = ocrEngine->loadGameClockModel(gameModel.toStdString());
-			if (gameOk) {
-				blog(LOG_INFO, "Game clock model loaded successfully: %s", gameModel.toUtf8().constData());
-			} else {
-				blog(LOG_ERROR, "Failed to load game clock model: %s", gameModel.toUtf8().constData());
-			}
-		}
-		
-		// Enable Bayesian filtering with Markov model (enabled by default, but ensure it's on)
-		if (shotOk || gameOk) {
-			ocrEngine->enableBayesianFiltering(true);
-			blog(LOG_INFO, "Bayesian filtering with Markov model enabled for multi-frame averaging");
-		}
-		
-		if (shotOk && gameOk) {
-			message = "✓ Both CNN models loaded successfully!\n\n"
-			          "Bayesian filtering enabled:\n"
-			          "• Markov transition matrices\n"
-			          "• Multi-frame temporal smoothing\n"
-			          "• Handles blocked/obscured frames";
-			// Enable ROI selector buttons
-			selectShotRoiBtn->setEnabled(true);
-			selectGameRoiBtn->setEnabled(true);
-			QMessageBox::information(this, "CNN Models", message);
-		} else if (shotOk || gameOk) {
-			message = QString("⚠ Partial success:\n%1%2\n\nBayesian filtering enabled for loaded model(s)")
-				.arg(shotOk ? "✓ Shot clock model loaded\n" : "✗ Shot clock model failed\n")
-				.arg(gameOk ? "✓ Game clock model loaded" : "✗ Game clock model failed");
-			if (shotOk) {
-				selectShotRoiBtn->setEnabled(true);
-			}
-			if (gameOk) {
-				selectGameRoiBtn->setEnabled(true);
-			}
-			QMessageBox::warning(this, "CNN Models", message);
-		} else {
-			message = "✗ Failed to load CNN models.\nPlease check the file paths.";
-			QMessageBox::critical(this, "CNN Models", message);
-		}
+                QString shotModel = shotClockModelEdit->text();
+                QString gameModel = gameClockModelEdit->text();
+
+                loadModelsBtn->setEnabled(false);
+                loadModelsBtn->setText("Loading...");
+
+                // Load models asynchronously to avoid blocking the main UI thread
+                std::thread([this, shotModel, gameModel]() {
+                        bool shotOk = false, gameOk = false;
+
+                        if (!shotModel.isEmpty() && QFile::exists(shotModel)) {
+                                shotOk = ocrEngine->loadShotClockModel(shotModel.toStdString());
+                                if (shotOk) {
+                                        blog(LOG_INFO, "Shot clock model loaded successfully: %s", shotModel.toUtf8().constData());
+                                } else {
+                                        blog(LOG_ERROR, "Failed to load shot clock model: %s", shotModel.toUtf8().constData());
+                                }
+                        }
+
+                        if (!gameModel.isEmpty() && QFile::exists(gameModel)) {
+                                gameOk = ocrEngine->loadGameClockModel(gameModel.toStdString());
+                                if (gameOk) {
+                                        blog(LOG_INFO, "Game clock model loaded successfully: %s", gameModel.toUtf8().constData());
+                                } else {
+                                        blog(LOG_ERROR, "Failed to load game clock model: %s", gameModel.toUtf8().constData());
+                                }
+                        }
+
+                        // Call back to main UI thread safely
+                        QMetaObject::invokeMethod(this, [this, shotOk, gameOk]() {
+                                loadModelsBtn->setEnabled(true);
+                                loadModelsBtn->setText("Load CNN Models");
+
+                                if (shotOk || gameOk) {
+                                        ocrEngine->enableBayesianFiltering(true);
+                                        blog(LOG_INFO, "Bayesian filtering with Markov model enabled");
+                                }
+
+                                QString message;
+                                if (shotOk && gameOk) {
+                                        message = "✓ Both CNN models loaded successfully!\n\nBayesian filtering enabled:\n• Markov transition matrices\n• Multi-frame temporal smoothing\n• Handles blocked/obscured frames";
+                                        selectShotRoiBtn->setEnabled(true);
+                                        selectGameRoiBtn->setEnabled(true);
+                                        QMessageBox::information(this, "CNN Models", message);
+                                } else if (shotOk || gameOk) {
+                                        message = QString("⚠ Partial success:\n%1%2\n\nBayesian filtering enabled for loaded model(s)")
+                                                .arg(shotOk ? "✓ Shot clock model loaded\n" : "✗ Shot clock model failed\n")
+                                                .arg(gameOk ? "✓ Game clock model loaded" : "✗ Game clock model failed");
+                                        if (shotOk) selectShotRoiBtn->setEnabled(true);
+                                        if (gameOk) selectGameRoiBtn->setEnabled(true);
+                                        QMessageBox::warning(this, "CNN Models", message);
+                                } else {
+                                        message = "✗ Failed to load CNN models.\nPlease check the file paths.";
+                                        QMessageBox::critical(this, "CNN Models", message);
+                                }
+                        }, Qt::QueuedConnection);
+                }).detach();
 #else
 		QMessageBox msgBox(this);
 		msgBox.setWindowTitle("CNN Support Not Available");
@@ -1483,44 +2135,47 @@ private slots:
 		obs_enum_sources(enumSources, &enumData);
 		
 		if (videoSourceNames.isEmpty()) {
-			QMessageBox::warning(this, "No Video Sources", 
+			QMessageBox::warning(this, "No Video Sources",
 				"No video sources found in OBS.\n\n"
 				"Please add a video capture device to your OBS scene first.");
 			return;
 		}
-		
-		// Show source selection dialog
-		bool ok;
-		QString selectedSource = QInputDialog::getItem(this, 
-			"Select Video Source",
-			"Choose a video source to capture frame from:",
-			videoSourceNames, 0, false, &ok);
-		
-		if (!ok || selectedSource.isEmpty()) {
-			// Release all source references
-			for (obs_source_t* source : videoSourceMap.values()) {
-				obs_source_release(source);
+
+		// Use saved source if it's still available; otherwise ask
+		QSettings roiSettings2("WaterPoloScoreboard", "CNNModels");
+		QString savedSource = roiSettings2.value("shotClockROI_source", "").toString();
+		QString selectedSource;
+		if (!savedSource.isEmpty() && videoSourceMap.contains(savedSource)) {
+			selectedSource = savedSource;
+		} else {
+			bool ok;
+			selectedSource = QInputDialog::getItem(this,
+				"Select Video Source",
+				"Choose a video source to capture frame from:",
+				videoSourceNames, 0, false, &ok);
+			if (!ok || selectedSource.isEmpty()) {
+				for (obs_source_t* src : videoSourceMap.values()) obs_source_release(src);
+				return;
 			}
-			return;
 		}
-		
+
 		obs_source_t* source = videoSourceMap[selectedSource];
-		
+
 		// Capture a frame from the source using our helper function
 		QImage frame = captureFrameFromOBSSource(source);
-		
+
 		// Release source references
 		for (obs_source_t* src : videoSourceMap.values()) {
 			obs_source_release(src);
 		}
-		
+
 		if (frame.isNull()) {
-			QMessageBox::warning(this, "Capture Failed", 
+			QMessageBox::warning(this, "Capture Failed",
 				"Failed to capture frame from video source.\n"
 				"Make sure the source is active and visible.");
 			return;
 		}
-		
+
 		// Create ROI selector dialog with the captured frame
 		ROISelectorDialog* dialog = new ROISelectorDialog(this);
 		dialog->setWindowTitle("Select Shot Clock ROI - " + selectedSource);
@@ -1539,9 +2194,7 @@ private slots:
 		// Set the captured frame (dialog will use this instead of live camera)
 		dialog->getCanvas()->setFrame(frame);
 		dialog->getCanvas()->setSelectionMode("shot");
-		
-		// Hide camera controls since we're using a static frame
-		// Hide camera controls not needed for static frame
+		dialog->hideCameraControls();
 		
 		
 		// Show dialog
@@ -1613,44 +2266,49 @@ private slots:
 		obs_enum_sources(enumSources, &enumData);
 		
 		if (videoSourceNames.isEmpty()) {
-			QMessageBox::warning(this, "No Video Sources", 
+			QMessageBox::warning(this, "No Video Sources",
 				"No video sources found in OBS.\n\n"
 				"Please add a video capture device to your OBS scene first.");
 			return;
 		}
-		
-		// Show source selection dialog
-		bool ok;
-		QString selectedSource = QInputDialog::getItem(this, 
-			"Select Video Source",
-			"Choose a video source to capture frame from:",
-			videoSourceNames, 0, false, &ok);
-		
-		if (!ok || selectedSource.isEmpty()) {
-			// Release all source references
-			for (obs_source_t* source : videoSourceMap.values()) {
-				obs_source_release(source);
+
+		// Use saved source if it's still available; otherwise ask
+		QSettings roiSettings2("WaterPoloScoreboard", "CNNModels");
+		QString savedSource = roiSettings2.value("gameClockROI_source", "").toString();
+		// Also accept the shot clock source as a sensible default
+		if (savedSource.isEmpty()) savedSource = roiSettings2.value("shotClockROI_source", "").toString();
+		QString selectedSource;
+		if (!savedSource.isEmpty() && videoSourceMap.contains(savedSource)) {
+			selectedSource = savedSource;
+		} else {
+			bool ok;
+			selectedSource = QInputDialog::getItem(this,
+				"Select Video Source",
+				"Choose a video source to capture frame from:",
+				videoSourceNames, 0, false, &ok);
+			if (!ok || selectedSource.isEmpty()) {
+				for (obs_source_t* src : videoSourceMap.values()) obs_source_release(src);
+				return;
 			}
-			return;
 		}
-		
+
 		obs_source_t* source = videoSourceMap[selectedSource];
-		
+
 		// Capture a frame from the source using our helper function
 		QImage frame = captureFrameFromOBSSource(source);
-		
+
 		// Release source references
 		for (obs_source_t* src : videoSourceMap.values()) {
 			obs_source_release(src);
 		}
-		
+
 		if (frame.isNull()) {
-			QMessageBox::warning(this, "Capture Failed", 
+			QMessageBox::warning(this, "Capture Failed",
 				"Failed to capture frame from video source.\n"
 				"Make sure the source is active and visible.");
 			return;
 		}
-		
+
 		// Create ROI selector dialog with the captured frame
 		ROISelectorDialog* dialog = new ROISelectorDialog(this);
 		dialog->setWindowTitle("Select Game Clock ROI - " + selectedSource);
@@ -1669,9 +2327,7 @@ private slots:
 		// Set the captured frame (dialog will use this instead of live camera)
 		dialog->getCanvas()->setFrame(frame);
 		dialog->getCanvas()->setSelectionMode("game");
-		
-		// Hide camera controls since we're using a static frame
-		// Hide camera controls not needed for static frame
+		dialog->hideCameraControls();
 		
 		
 		// Show dialog
@@ -1743,6 +2399,36 @@ private slots:
 		}
 	}
 	
+	// Raw video callback: called by OBS's video output thread with CPU-side BGRA data.
+	// Converts BGRA→RGBA and stores under mutex for the Qt timer to read.
+	static void rawVideoCallback(void *param, struct video_data *frame) {
+		auto *self = static_cast<ScoreboardControlPanel*>(param);
+		if (!frame || !frame->data[0]) return;
+
+		struct obs_video_info ovi;
+		if (!obs_get_video_info(&ovi)) return;
+		uint32_t w = ovi.base_width;
+		uint32_t h = ovi.base_height;
+		uint32_t stride = frame->linesize[0];
+
+		std::vector<uint8_t> bytes(w * h * 4);
+		for (uint32_t row = 0; row < h; row++) {
+			const uint8_t *src = frame->data[0] + row * stride;
+			uint8_t *dst = bytes.data() + row * w * 4;
+			for (uint32_t x = 0; x < w; x++) {
+				dst[x*4+0] = src[x*4+2]; // BGRA → RGBA
+				dst[x*4+1] = src[x*4+1];
+				dst[x*4+2] = src[x*4+0];
+				dst[x*4+3] = src[x*4+3];
+			}
+		}
+
+		std::lock_guard<std::mutex> lock(self->rawVideoMutex);
+		self->rawVideoBytes = std::move(bytes);
+		self->rawVideoW = w;
+		self->rawVideoH = h;
+	}
+
 	void startClockDetection() {
 		blog(LOG_INFO, "startClockDetection() called");
 		
@@ -1755,30 +2441,17 @@ private slots:
 			shotClockSourceName.toUtf8().constData(),
 			gameClockSourceName.toUtf8().constData());
 		
-		// Get the OBS sources
-		shotClockVideoSource = obs_get_source_by_name(shotClockSourceName.toUtf8().constData());
-		gameClockVideoSource = obs_get_source_by_name(gameClockSourceName.toUtf8().constData());
-		
-		if (!shotClockVideoSource || !gameClockVideoSource) {
-			blog(LOG_WARNING, "Source lookup failed: shot=%p, game=%p", 
-				shotClockVideoSource, gameClockVideoSource);
-			QMessageBox::warning(this, "Source Not Found",
-				"Could not find one or more video sources.\n"
-				"Please reconfigure the ROIs.");
-			if (shotClockVideoSource) obs_source_release(shotClockVideoSource);
-			if (gameClockVideoSource) obs_source_release(gameClockVideoSource);
-			shotClockVideoSource = nullptr;
-			gameClockVideoSource = nullptr;
-			return;
-		}
-		
-		blog(LOG_INFO, "Sources found successfully, creating timer");
-		
-		// Create and start update timer at 30 FPS to match CNN training conditions
-		// This ensures frames are captured at the same rate as training data
+		blog(LOG_INFO, "Starting detection with sources: shot='%s', game='%s'",
+			shotClockSourceName.toUtf8().constData(),
+			gameClockSourceName.toUtf8().constData());
+
+		// No global canvas callback needed — frames are captured per-source
+		// directly in updateClocksFromOCR using captureFrameFromOBSSource.
+
+		// Timer drives OCR inference at 10 FPS
 		ocrUpdateTimer = new QTimer(this);
 		connect(ocrUpdateTimer, &QTimer::timeout, this, &ScoreboardControlPanel::updateClocksFromOCR);
-		ocrUpdateTimer->start(33); // 30 FPS (~33ms per frame)
+		ocrUpdateTimer->start(100);
 		
 		detectionRunning = true;
 		startDetectionBtn->setEnabled(false);
@@ -1791,22 +2464,15 @@ private slots:
 	
 	void stopClockDetection() {
 		if (!detectionRunning) return;
-		
+
 		if (ocrUpdateTimer) {
 			ocrUpdateTimer->stop();
 			delete ocrUpdateTimer;
 			ocrUpdateTimer = nullptr;
 		}
 		
-		if (shotClockVideoSource) {
-			obs_source_release(shotClockVideoSource);
-			shotClockVideoSource = nullptr;
-		}
-		
-		if (gameClockVideoSource) {
-			obs_source_release(gameClockVideoSource);
-			gameClockVideoSource = nullptr;
-		}
+		shotClockVideoSource = nullptr;
+		gameClockVideoSource = nullptr;
 		
 		detectionRunning = false;
 		startDetectionBtn->setEnabled(true);
@@ -1827,20 +2493,26 @@ private slots:
 		// - Natural clock transitions (counting down)
 		// - Reset events (30->29, 24->23, etc.)
 		
-		QImage shotClockFrame = captureFrameFromOBSSource(shotClockVideoSource);
-		QImage gameClockFrame;
-		
-		// If using same source for both, reuse the frame
-		if (shotClockSourceName == gameClockSourceName && shotClockVideoSource == gameClockVideoSource) {
-			gameClockFrame = shotClockFrame;
-		} else {
-			gameClockFrame = captureFrameFromOBSSource(gameClockVideoSource);
+		// Capture directly from each named OBS source so ROI coordinates
+		// (which are in source-frame space) match the captured pixels.
+		QImage shotClockFrame, gameClockFrame;
+		{
+			obs_source_t *shotSrc = obs_get_source_by_name(shotClockSourceName.toUtf8().constData());
+			if (shotSrc) {
+				shotClockFrame = captureFrameFromOBSSource(shotSrc);
+				obs_source_release(shotSrc);
+			}
 		}
-		
-		if (shotClockFrame.isNull() || gameClockFrame.isNull()) {
-			// Skip this update if frames couldn't be captured
+		{
+			obs_source_t *gameSrc = obs_get_source_by_name(gameClockSourceName.toUtf8().constData());
+			if (gameSrc) {
+				gameClockFrame = captureFrameFromOBSSource(gameSrc);
+				obs_source_release(gameSrc);
+			}
+		}
+
+		if (shotClockFrame.isNull() || gameClockFrame.isNull())
 			return;
-		}
 		
 		// Convert QImage to cv::Mat
 		cv::Mat shotMat = qImageToMat(shotClockFrame);
@@ -1859,53 +2531,150 @@ private slots:
 		ClockPrediction shotPred, gamePred;
 		
 		// Process shot clock with Bayesian filtering
-		if (shotRoi.x >= 0 && shotRoi.y >= 0 && 
+		if (shotRoi.x >= 0 && shotRoi.y >= 0 &&
 		    shotRoi.x + shotRoi.width <= shotMat.cols &&
 		    shotRoi.y + shotRoi.height <= shotMat.rows) {
-			
-			// Get CNN prediction with Bayesian filtering (frame already set above)
-			// This internally:
-			// - Runs CNN to get digit probabilities
-			// - Applies Markov transition matrix (time evolution)
-			// - Updates posterior probability distribution
-			// - Returns most likely value with confidence
+
 			shotPred = ocrEngine->predictShotClock();
-			
-			if (shotPred.confidence > 0.7) {
+
+			if (shotPred.confidence > 0.7 && shotPred.is_blocked) {
+				// Blocked frame: reset same-run counter so blockage doesn't
+				// accumulate toward pause detection. Timer keeps running.
+				shotOCRSameRun = 0;
+			} else if (shotPred.confidence > 0.7 && !shotPred.is_blocked) {
 				try {
-					// Update shot clock display
-					int shotValue = std::stoi(shotPred.value);
-					shotClockSpin->setValue(shotValue);
-				} catch (...) {
-					// Ignore parse errors
-				}
+					int ocrVal = std::stoi(shotPred.value);
+
+					// --- Pause / auto-start (shared by both modes) ---
+					if (ocrVal == shotOCRLast) {
+						shotOCRSameRun++;
+						if (!shotOCRPaused && shotOCRSameRun >= kPauseFrameThreshold && shotClockRunning) {
+							stopShotClock();
+							shotOCRPaused = true;
+						}
+						// Hard-sync after ~3 s paused
+						if (shotOCRPaused && shotOCRSameRun >= kPauseFrameThreshold * 3 / 2) {
+							shotClockSpin->setValue(ocrVal);
+							if (clockSyncMode == 1) shotClockMs = ocrVal * 1000.0;
+						}
+					} else if (ocrVal > shotOCRLast) {
+						// Clock increased → reset occurred. Snap to new value and stay
+						// paused until we see it actually start counting down.
+						shotOCRSameRun = 0;
+						shotClockSpin->setValue(ocrVal);
+						if (clockSyncMode == 1) shotClockMs = ocrVal * 1000.0;
+						if (shotClockRunning) stopShotClock();
+						shotOCRPaused = true;
+					} else {
+						// Clock decreased → actively counting down
+						shotOCRSameRun = 0;
+						if (!shotClockRunning) {
+							shotClockSpin->setValue(ocrVal);
+							startShotClock(); // initialises shotClockMs in rate mode
+						}
+						shotOCRPaused = false;
+
+						if (clockSyncMode == 0) {
+							// --- Event-based: safety snap only ---
+							int internal   = shotClockSpin->value();
+							int diff       = std::abs(ocrVal - internal);
+							bool nearZero  = (ocrVal <= 5 || internal <= 5);
+							if (diff > (nearZero ? 1 : 10))
+								shotClockSpin->setValue(ocrVal);
+						} else {
+							// --- Rate-based: adjust playback rate to converge ---
+							double ocrMs  = ocrVal * 1000.0;
+							double diffMs = shotClockMs - ocrMs; // + = ahead, - = behind
+							if (std::abs(diffMs) > 10000.0) {
+								// Way off — hard snap
+								shotClockMs   = ocrMs;
+								shotClockRate = 1.0;
+							} else {
+								// Near zero tighten convergence so accuracy is preserved
+								bool nearZero = (ocrVal <= 5);
+								double conv   = nearZero ? kRateConvergenceMs / 2.0 : kRateConvergenceMs;
+								shotClockRate = 1.0 + diffMs / conv;
+								shotClockRate = std::max(0.5, std::min(2.0, shotClockRate));
+							}
+						}
+					}
+					shotOCRLast = ocrVal;
+				} catch (...) {}
 			}
 		}
-		
+
 		// Process game clock with Bayesian filtering
 		if (gameRoi.x >= 0 && gameRoi.y >= 0 &&
 		    gameRoi.x + gameRoi.width <= gameMat.cols &&
 		    gameRoi.y + gameRoi.height <= gameMat.rows) {
-			
-			// Get CNN prediction with Bayesian filtering (frame already set above)
-			// Game clock filter handles 0:00 to 7:59 (480 states)
-			// with appropriate transition probabilities for quarter/period endings
+
 			gamePred = ocrEngine->predictGameClock();
-			
-			if (gamePred.confidence > 0.7) {
+
+			if (gamePred.confidence > 0.7 && gamePred.is_blocked) {
+				gameOCRSameRun = 0;
+			} else if (gamePred.confidence > 0.7 && !gamePred.is_blocked) {
 				try {
-					// Parse MM:SS format
 					size_t colonPos = gamePred.value.find(':');
 					if (colonPos != std::string::npos) {
-						int minutes = std::stoi(gamePred.value.substr(0, colonPos));
-						int seconds = std::stoi(gamePred.value.substr(colonPos + 1));
-						
-						gameMinutesSpin->setValue(minutes);
-						gameSecondsSpin->setValue(seconds);
+						int minutes  = std::stoi(gamePred.value.substr(0, colonPos));
+						int seconds  = std::stoi(gamePred.value.substr(colonPos + 1));
+						int ocrTotal = minutes * 60 + seconds;
+
+						if (ocrTotal == gameOCRLast) {
+							gameOCRSameRun++;
+							if (!gameOCRPaused && gameOCRSameRun >= kPauseFrameThreshold && gameClockRunning) {
+								stopGameClock();
+								gameOCRPaused = true;
+							}
+							// Hard-sync after ~3 s paused
+							if (gameOCRPaused && gameOCRSameRun >= kPauseFrameThreshold * 3 / 2) {
+								gameMinutesSpin->setValue(ocrTotal / 60);
+								gameSecondsSpin->setValue(ocrTotal % 60);
+								if (clockSyncMode == 1) gameClockMs = ocrTotal * 1000.0;
+							}
+						} else if (ocrTotal > gameOCRLast) {
+							// Clock increased → reset. Stay paused, snap to new value.
+							gameOCRSameRun = 0;
+							gameMinutesSpin->setValue(ocrTotal / 60);
+							gameSecondsSpin->setValue(ocrTotal % 60);
+							if (clockSyncMode == 1) gameClockMs = ocrTotal * 1000.0;
+							if (gameClockRunning) stopGameClock();
+							gameOCRPaused = true;
+						} else {
+							// Clock decreased → counting down
+							gameOCRSameRun = 0;
+							if (!gameClockRunning) {
+								gameMinutesSpin->setValue(ocrTotal / 60);
+								gameSecondsSpin->setValue(ocrTotal % 60);
+								startGameClock(); // initialises gameClockMs in rate mode
+							}
+							gameOCRPaused = false;
+
+							if (clockSyncMode == 0) {
+								int internalTotal = gameMinutesSpin->value() * 60 + gameSecondsSpin->value();
+								int diff          = std::abs(ocrTotal - internalTotal);
+								bool nearZero     = (ocrTotal <= 10 || internalTotal <= 10);
+								if (diff > (nearZero ? 1 : 10)) {
+									gameMinutesSpin->setValue(ocrTotal / 60);
+									gameSecondsSpin->setValue(ocrTotal % 60);
+								}
+							} else {
+								double ocrMs  = ocrTotal * 1000.0;
+								double diffMs = gameClockMs - ocrMs;
+								if (std::abs(diffMs) > 10000.0) {
+									gameClockMs   = ocrMs;
+									gameClockRate = 1.0;
+								} else {
+									bool nearZero = (ocrTotal <= 10);
+									double conv   = nearZero ? kRateConvergenceMs / 2.0 : kRateConvergenceMs;
+									gameClockRate = 1.0 + diffMs / conv;
+									gameClockRate = std::max(0.5, std::min(2.0, gameClockRate));
+								}
+							}
+						}
+						gameOCRLast = ocrTotal;
 					}
-				} catch (...) {
-					// Ignore parse errors
-				}
+				} catch (...) {}
 			}
 		}
 		
@@ -1966,3 +2735,63 @@ void shutdown_control_panel()
 		g_control_panel = nullptr;
 	}
 }
+
+void select_next_game()
+{
+	if (g_control_panel)
+		QMetaObject::invokeMethod(g_control_panel, "nextGame", Qt::QueuedConnection);
+}
+
+void select_prev_game()
+{
+	if (g_control_panel)
+		QMetaObject::invokeMethod(g_control_panel, "prevGame", Qt::QueuedConnection);
+}
+
+QJsonObject get_schedule_json()
+{
+	return g_control_panel ? g_control_panel->getScheduleJson() : QJsonObject();
+}
+
+void set_game_score_at_index(int idx, int hs, int as_, const QString &winner)
+{
+	if (g_control_panel) g_control_panel->setGameScoreAtIndex(idx, hs, as_, winner);
+}
+
+QJsonObject get_settings_json()
+{
+	return g_control_panel ? g_control_panel->getSettingsJson() : QJsonObject();
+}
+
+void apply_settings_json(const QJsonObject &s)
+{
+	if (g_control_panel) g_control_panel->applySettingsJson(s);
+}
+
+QJsonObject get_rois_json()
+{
+	return g_control_panel ? g_control_panel->getRoisJson() : QJsonObject();
+}
+
+void set_roi_data(const QString &clock, int x, int y, int w, int h)
+{
+	if (g_control_panel) g_control_panel->setRoiData(clock, x, y, w, h);
+}
+
+QJsonArray get_teams_json()
+{
+	return g_control_panel ? g_control_panel->getTeamsJson() : QJsonArray();
+}
+
+void set_team_color_data(const QString &name, const QString &hbg, const QString &ht,
+                         const QString &abg, const QString &at_)
+{
+	if (g_control_panel) g_control_panel->setTeamColorData(name, hbg, ht, abg, at_);
+}
+
+void sync_control_panel_ui()
+{
+	if (g_control_panel)
+		QMetaObject::invokeMethod(g_control_panel, "syncUIFromState", Qt::QueuedConnection);
+}
+

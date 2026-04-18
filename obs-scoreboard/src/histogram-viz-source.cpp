@@ -9,36 +9,30 @@
 
 #ifdef USE_CNN_OCR
 #include "clock-ocr-engine.h"
+#ifdef __APPLE__
+#undef NO
+#undef YES
+#endif
 #include <opencv2/opencv.hpp>
 #endif
 
 struct histogram_viz_source {
 	obs_source_t *source;
 	gs_texture_t *texture;
-	
+
 	uint32_t width;
 	uint32_t height;
-	
+
 #ifdef USE_CNN_OCR
-	// Histogram data
-	std::vector<float> shot_prior;
-	std::vector<float> shot_cnn;
-	std::vector<float> shot_posterior;
-	std::vector<float> game_prior;
-	std::vector<float> game_cnn;
-	std::vector<float> game_posterior;
-	
-	// Predicted values for display
-	std::string shot_value;
-	float shot_confidence;
-	std::string game_value;
-	float game_confidence;
-	
-	std::mutex data_mutex;
-	bool needs_update;
+	// Pre-rendered BGRA bytes produced on the Qt/update side.
+	std::vector<uint8_t> pending_bytes;
+	uint32_t             pending_w = 0;
+	uint32_t             pending_h = 0;
+	std::mutex           data_mutex;
+	bool                 needs_update = false;
 #endif
-	
-	bool data_updated;
+
+	bool data_updated = false;
 };
 
 static const char *histogram_viz_source_get_name(void *unused)
@@ -51,37 +45,18 @@ static void histogram_viz_source_update(void *data, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(settings);
 	struct histogram_viz_source *context = (struct histogram_viz_source *)data;
-	
-	// Fixed size for histogram display
-	context->width = 1200;
+	context->width  = 1200;
 	context->height = 800;
 }
 
 static void *histogram_viz_source_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct histogram_viz_source *context = (struct histogram_viz_source *)bzalloc(sizeof(struct histogram_viz_source));
-	context->source = source;
-	context->width = 1200;
-	context->height = 800;
-	context->data_updated = false;
+	struct histogram_viz_source *context = new histogram_viz_source();
+	context->source  = source;
+	context->width   = 1200;
+	context->height  = 800;
 	context->texture = nullptr;
-	
-#ifdef USE_CNN_OCR
-	context->needs_update = true;
-	
-	// Initialize empty vectors
-	context->shot_prior.resize(31, 0.0f);
-	context->shot_cnn.resize(31, 0.0f);
-	context->shot_posterior.resize(31, 0.0f);
-	context->game_prior.resize(480, 0.0f);
-	context->game_cnn.resize(480, 0.0f);
-	context->game_posterior.resize(480, 0.0f);
-	context->shot_value = "00";
-	context->shot_confidence = 0.0f;
-	context->game_value = "0:00";
-	context->game_confidence = 0.0f;
-#endif
-	
+
 	histogram_viz_source_update(context, settings);
 	return context;
 }
@@ -89,315 +64,189 @@ static void *histogram_viz_source_create(obs_data_t *settings, obs_source_t *sou
 static void histogram_viz_source_destroy(void *data)
 {
 	struct histogram_viz_source *context = (struct histogram_viz_source *)data;
-	
 	if (context) {
 		if (context->texture) {
 			obs_enter_graphics();
 			gs_texture_destroy(context->texture);
 			obs_leave_graphics();
 		}
-		bfree(context);
+		delete context;
 	}
 }
 
 static uint32_t histogram_viz_source_get_width(void *data)
 {
-	struct histogram_viz_source *context = (struct histogram_viz_source *)data;
-	return context->width;
+	return ((struct histogram_viz_source *)data)->width;
 }
 
 static uint32_t histogram_viz_source_get_height(void *data)
 {
-	struct histogram_viz_source *context = (struct histogram_viz_source *)data;
-	return context->height;
+	return ((struct histogram_viz_source *)data)->height;
 }
 
 #ifdef USE_CNN_OCR
-// Helper function to draw a single histogram using OpenCV
-static void draw_histogram_cv(cv::Mat& img, const std::vector<float>& data, 
+static void draw_histogram_cv(cv::Mat& img, const std::vector<float>& data,
                                int x, int y, int w, int h,
                                const cv::Scalar& color, const std::string& title)
 {
 	if (data.empty()) return;
-	
-	// Draw border
-	cv::rectangle(img, cv::Point(x, y), cv::Point(x + w, y + h), cv::Scalar(200, 200, 200), 2);
-	
-	// Draw title in white for better readability
-	cv::putText(img, title, cv::Point(x + 10, y + 25), 
-	            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-	
-	// Find max value and its index for scaling and argmax
+	cv::rectangle(img, cv::Point(x, y), cv::Point(x+w, y+h), cv::Scalar(200,200,200), 2);
+	cv::putText(img, title, cv::Point(x+10, y+25),
+	            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 2);
+
 	auto max_it = std::max_element(data.begin(), data.end());
 	float max_val = *max_it;
 	size_t argmax_idx = std::distance(data.begin(), max_it);
-	
-	// For very flat distributions, use a minimum scale to make them visible
 	float display_max = std::max(max_val, 0.01f);
-	
-	// Drawing area (leave margin for title and padding)
+
 	int hist_y = y + 40;
-	int hist_h = h - 80; // More space for argmax text
+	int hist_h = h - 80;
 	int hist_x = x + 10;
 	int hist_w = w - 20;
-	
-	// Draw bars
+
 	float bar_width = (float)hist_w / data.size();
 	for (size_t i = 0; i < data.size(); i++) {
 		float bar_height = (data[i] / display_max) * hist_h;
 		int bar_x = hist_x + (int)(i * bar_width);
 		int bar_y = hist_y + hist_h - (int)bar_height;
-		
-		// Highlight the argmax bar with brighter color
+
 		cv::Scalar bar_color = color;
 		if (i == argmax_idx && max_val > 0.001f) {
 			bar_color = cv::Scalar(
 				std::min(255.0, color[0] * 1.5),
-				std::min(255.0, color[1] * 1.5), 
+				std::min(255.0, color[1] * 1.5),
 				std::min(255.0, color[2] * 1.5),
-				color[3]
-			);
+				color[3]);
 		}
-		
-		cv::rectangle(img, 
-		              cv::Point(bar_x, bar_y),
+		cv::rectangle(img, cv::Point(bar_x, bar_y),
 		              cv::Point(bar_x + (int)bar_width - 1, hist_y + hist_h),
 		              bar_color, cv::FILLED);
 	}
-	
-	// Draw max value indicator in white
+
 	char max_text[64];
 	snprintf(max_text, sizeof(max_text), "Max: %.3f", max_val);
-	cv::putText(img, max_text, cv::Point(x + 10, y + h - 30), 
-	            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
-	
-	// Draw argmax value and index in white
+	cv::putText(img, max_text, cv::Point(x+10, y+h-30),
+	            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1);
+
 	char argmax_text[128];
 	snprintf(argmax_text, sizeof(argmax_text), "Argmax: %zu (%.3f)", argmax_idx, max_val);
-	cv::putText(img, argmax_text, cv::Point(x + 10, y + h - 10), 
-	            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+	cv::putText(img, argmax_text, cv::Point(x+10, y+h-10),
+	            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1);
 }
 
-static void draw_zoomed_game_histogram_cv(cv::Mat& img, const std::vector<float>& data, 
+static void draw_zoomed_game_histogram_cv(cv::Mat& img, const std::vector<float>& data,
                                           int x, int y, int w, int h,
                                           const cv::Scalar& color, const std::string& title)
 {
-	if (data.empty() || data.size() != 480) return; // Expect 480 game clock states
-	
-	// Draw border
-	cv::rectangle(img, cv::Point(x, y), cv::Point(x + w, y + h), cv::Scalar(200, 200, 200), 2);
-	
-	// Find argmax in full data
+	if (data.empty() || data.size() != 480) return;
+	cv::rectangle(img, cv::Point(x, y), cv::Point(x+w, y+h), cv::Scalar(200,200,200), 2);
+
 	auto max_it = std::max_element(data.begin(), data.end());
 	float max_val = *max_it;
 	size_t argmax_idx = std::distance(data.begin(), max_it);
-	
-	// Calculate zoom window: 20 bars on each side of argmax (41 total bars)
+
 	const int zoom_radius = 20;
 	int start_idx = std::max(0, (int)argmax_idx - zoom_radius);
-	int end_idx = std::min((int)data.size() - 1, (int)argmax_idx + zoom_radius);
-	int num_bars = end_idx - start_idx + 1;
-	
-	// Create zoomed data slice
-	std::vector<float> zoomed_data(data.begin() + start_idx, data.begin() + end_idx + 1);
-	
-	// Convert argmax to time for display
+	int end_idx   = std::min((int)data.size() - 1, (int)argmax_idx + zoom_radius);
+	int num_bars  = end_idx - start_idx + 1;
+
+	std::vector<float> zoomed(data.begin() + start_idx, data.begin() + end_idx + 1);
 	int argmax_minutes = argmax_idx / 60;
 	int argmax_seconds = argmax_idx % 60;
-	
-	// Draw title with argmax time info
+
 	char title_text[256];
-	snprintf(title_text, sizeof(title_text), "%s (Argmax: %d:%02d)", 
+	snprintf(title_text, sizeof(title_text), "%s (Argmax: %d:%02d)",
 	         title.c_str(), argmax_minutes, argmax_seconds);
-	cv::putText(img, title_text, cv::Point(x + 10, y + 25), 
-	            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-	
-	// For very flat distributions, use a minimum scale
+	cv::putText(img, title_text, cv::Point(x+10, y+25),
+	            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 2);
+
 	float display_max = std::max(max_val, 0.01f);
-	
-	// Drawing area
 	int hist_y = y + 40;
-	int hist_h = h - 100; // More space for time labels
+	int hist_h = h - 100;
 	int hist_x = x + 10;
 	int hist_w = w - 20;
-	
-	// Draw individual bars for each time value
+
 	float bar_width = (float)hist_w / num_bars;
 	for (int i = 0; i < num_bars; i++) {
 		int actual_idx = start_idx + i;
-		float value = zoomed_data[i];
+		float value = zoomed[i];
 		float bar_height = (value / display_max) * hist_h;
 		int bar_x = hist_x + (int)(i * bar_width);
 		int bar_y = hist_y + hist_h - (int)bar_height;
-		
-		// Highlight the argmax bar
+
 		cv::Scalar bar_color = color;
 		if (actual_idx == (int)argmax_idx && max_val > 0.001f) {
 			bar_color = cv::Scalar(
 				std::min(255.0, color[0] * 1.5),
-				std::min(255.0, color[1] * 1.5), 
+				std::min(255.0, color[1] * 1.5),
 				std::min(255.0, color[2] * 1.5),
-				color[3]
-			);
+				color[3]);
 		}
-		
-		cv::rectangle(img, 
-		              cv::Point(bar_x, bar_y),
+		cv::rectangle(img, cv::Point(bar_x, bar_y),
 		              cv::Point(bar_x + (int)bar_width - 1, hist_y + hist_h),
 		              bar_color, cv::FILLED);
-		
-		// Draw time labels for key positions (every 5th bar to avoid crowding)
+
 		if (i % 5 == 0 || actual_idx == (int)argmax_idx) {
 			int minutes = actual_idx / 60;
 			int seconds = actual_idx % 60;
 			char time_text[16];
 			snprintf(time_text, sizeof(time_text), "%d:%02d", minutes, seconds);
-			
-			// Use smaller font and white color
-			cv::putText(img, time_text, cv::Point(bar_x, y + h - 5), 
-			            cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(255, 255, 255), 1);
+			cv::putText(img, time_text, cv::Point(bar_x, y+h-5),
+			            cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(255,255,255), 1);
 		}
 	}
-	
-	// Draw statistics
-	char stats_text[128];
-	snprintf(stats_text, sizeof(stats_text), "Max: %.4f | Range: %d:%02d - %d:%02d", 
-	         max_val, start_idx/60, start_idx%60, end_idx/60, end_idx%60);
-	cv::putText(img, stats_text, cv::Point(x + 10, y + h - 25), 
-	            cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255, 255, 255), 1);
-}
 
+	char stats_text[128];
+	snprintf(stats_text, sizeof(stats_text),
+	         "Max: %.4f | Range: %d:%02d - %d:%02d",
+	         max_val, start_idx/60, start_idx%60, end_idx/60, end_idx%60);
+	cv::putText(img, stats_text, cv::Point(x+10, y+h-25),
+	            cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255,255,255), 1);
+}
 #endif
 
 static void histogram_viz_source_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
 	struct histogram_viz_source *context = (struct histogram_viz_source *)data;
-	
 	if (!context) return;
-	
+
 #ifdef USE_CNN_OCR
-	// Update texture if needed
 	if (context->needs_update) {
-		std::lock_guard<std::mutex> lock(context->data_mutex);
-		
-		// Create OpenCV image
-		cv::Mat img(800, 1200, CV_8UC4, cv::Scalar(20, 20, 20, 255)); // Dark gray background
-		
-		// Layout: 3x2 grid
-		// Row 1: Shot Clock (Prior, CNN, Posterior)
-		// Row 2: Game Clock (Prior, CNN, Posterior)
-		int margin = 20;
-		int col_width = 380;
-		int row_height = 350;
-		
-		// Shot Clock Row (y=20)
-		int y_shot = margin;
-		
-		// Shot Prior (cyan)
-		draw_histogram_cv(img, context->shot_prior, 
-		                  margin, y_shot, col_width, row_height,
-		                  cv::Scalar(255, 255, 0, 255), "Shot Prior");
-		
-		// Shot CNN (yellow)
-		draw_histogram_cv(img, context->shot_cnn,
-		                  margin + col_width + margin, y_shot, col_width, row_height,
-		                  cv::Scalar(0, 255, 255, 255), "Shot CNN");
-		
-		// Shot Posterior (green)
-		draw_histogram_cv(img, context->shot_posterior,
-		                  margin + 2 * (col_width + margin), y_shot, col_width, row_height,
-		                  cv::Scalar(0, 255, 0, 255), "Shot Posterior");
-		
-		// Game Clock Row (y=390) - Use zoomed histograms showing individual time bars
-		int y_game = margin + row_height + margin;
-		
-		// Use the new zoomed histogram function that shows individual time bars
-		// around the argmax instead of sampling every 8th value
-		
-		// Game Prior (cyan) - Zoomed view
-		draw_zoomed_game_histogram_cv(img, context->game_prior,
-		                             margin, y_game, col_width, row_height,
-		                             cv::Scalar(255, 255, 0, 255), "Game Prior");
-		
-		// Game CNN (yellow) - Zoomed view
-		draw_zoomed_game_histogram_cv(img, context->game_cnn,
-		                             margin + col_width + margin, y_game, col_width, row_height,
-		                             cv::Scalar(0, 255, 255, 255), "Game CNN");
-		
-		// Game Posterior (green) - Zoomed view
-		draw_zoomed_game_histogram_cv(img, context->game_posterior,
-		                             margin + 2 * (col_width + margin), y_game, col_width, row_height,
-		                             cv::Scalar(0, 255, 0, 255), "Game Posterior");
-		
-		// Convert cv::Mat to gs_texture_t
-		// OBS expects BGRA format, OpenCV uses BGRA by default (CV_8UC4)
-		obs_enter_graphics();
-		
-		// Destroy old texture if exists
-		if (context->texture) {
-			gs_texture_destroy(context->texture);
-			context->texture = nullptr;
+		std::unique_lock<std::mutex> lock(context->data_mutex, std::try_to_lock);
+		if (lock.owns_lock() && !context->pending_bytes.empty()) {
+			uint32_t w = context->pending_w;
+			uint32_t h = context->pending_h;
+			std::vector<uint8_t> bytes = std::move(context->pending_bytes);
+			context->needs_update = false;
+			lock.unlock(); // release before GPU work
+
+			// Already on the graphics thread — no obs_enter/leave needed.
+			if (context->texture) {
+				gs_texture_destroy(context->texture);
+				context->texture = nullptr;
+			}
+			const uint8_t *ptr = bytes.data();
+			context->texture = gs_texture_create(w, h, GS_BGRA, 1, &ptr, 0);
 		}
-		
-		// Create texture from cv::Mat data
-		context->texture = gs_texture_create(img.cols, img.rows, GS_BGRA, 1, 
-		                                      (const uint8_t **)&img.data, 0);
-		
-		obs_leave_graphics();
-		
-		context->needs_update = false;
-	}
-	
-	// Draw the texture
-	if (context->texture) {
-		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-		gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
-		gs_effect_set_texture(image, context->texture);
-		
-		while (gs_effect_loop(effect, "Draw")) {
-			gs_draw_sprite(context->texture, 0, context->width, context->height);
-		}
-	}
-#else
-	// Draw "CNN not enabled" message
-	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-	if (solid) {
-		gs_technique_t *tech = gs_effect_get_technique(solid, "Solid");
-		gs_eparam_t *param_color = gs_effect_get_param_by_name(solid, "color");
-		
-		struct vec4 bg_color;
-		vec4_set(&bg_color, 0.3f, 0.0f, 0.0f, 1.0f);
-		gs_effect_set_vec4(param_color, &bg_color);
-		
-		gs_technique_begin(tech);
-		gs_technique_begin_pass(tech, 0);
-		
-		gs_render_start(false);
-		gs_vertex2f(0, 0);
-		gs_vertex2f(context->width, 0);
-		gs_vertex2f(context->width, context->height);
-		gs_vertex2f(0, context->height);
-		gs_vertbuffer_t *bg = gs_render_save();
-		
-		gs_load_vertexbuffer(bg);
-		gs_draw(GS_TRISTRIP, 0, 4);
-		gs_vertexbuffer_destroy(bg);
-		
-		gs_technique_end_pass(tech);
-		gs_technique_end(tech);
 	}
 #endif
+
+	if (context->texture) {
+		gs_effect_t *eff = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		gs_eparam_t *image = gs_effect_get_param_by_name(eff, "image");
+		gs_effect_set_texture(image, context->texture);
+		while (gs_effect_loop(eff, "Draw"))
+			gs_draw_sprite(context->texture, 0, context->width, context->height);
+	}
 }
 
 static obs_properties_t *histogram_viz_source_properties(void *data)
 {
 	UNUSED_PARAMETER(data);
-	
 	obs_properties_t *props = obs_properties_create();
-	
 #ifdef USE_CNN_OCR
-	obs_properties_add_text(props, "info", 
+	obs_properties_add_text(props, "info",
 		"This source displays Bayesian filter histograms:\n"
 		"Top row: Shot Clock (0-30)\n"
 		"Bottom row: Game Clock (0:00-7:59)\n"
@@ -408,7 +257,6 @@ static obs_properties_t *histogram_viz_source_properties(void *data)
 		"CNN support not compiled. This source requires CNN features.",
 		OBS_TEXT_INFO);
 #endif
-	
 	return props;
 }
 
@@ -417,69 +265,84 @@ static void histogram_viz_source_defaults(obs_data_t *settings)
 	UNUSED_PARAMETER(settings);
 }
 
-// Public API to update histogram data
+struct obs_source_info histogram_viz_source_info = {};
+
+void init_histogram_viz_source_info()
+{
+	histogram_viz_source_info.id             = "histogram_viz_source";
+	histogram_viz_source_info.type           = OBS_SOURCE_TYPE_INPUT;
+	histogram_viz_source_info.output_flags   = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
+	histogram_viz_source_info.get_name       = histogram_viz_source_get_name;
+	histogram_viz_source_info.create         = histogram_viz_source_create;
+	histogram_viz_source_info.destroy        = histogram_viz_source_destroy;
+	histogram_viz_source_info.update         = histogram_viz_source_update;
+	histogram_viz_source_info.get_properties = histogram_viz_source_properties;
+	histogram_viz_source_info.get_defaults   = histogram_viz_source_defaults;
+	histogram_viz_source_info.video_render   = histogram_viz_source_render;
+	histogram_viz_source_info.get_width      = histogram_viz_source_get_width;
+	histogram_viz_source_info.get_height     = histogram_viz_source_get_height;
+}
+
 #ifdef USE_CNN_OCR
 void update_histogram_viz_data(
 	const ClockPrediction& shot_pred,
 	const ClockPrediction& game_pred)
 {
-	// Create a struct to pass both predictions through the void* parameter
-	struct PredPair {
-		const ClockPrediction* shot;
-		const ClockPrediction* game;
-	};
-	
-	PredPair pair = { &shot_pred, &game_pred };
-	
-	// Find the histogram source and update it
+	// Build the full histogram image on the calling (Qt) thread.
+	const int IMG_W = 1200, IMG_H = 800;
+	cv::Mat img(IMG_H, IMG_W, CV_8UC4, cv::Scalar(20, 20, 20, 255));
+
+	const int margin     = 20;
+	const int col_width  = 380;
+	const int row_height = 350;
+	const int y_shot     = margin;
+	const int y_game     = margin + row_height + margin;
+
+	draw_histogram_cv(img, shot_pred.prior,
+	                  margin, y_shot, col_width, row_height,
+	                  cv::Scalar(255,255,0,255), "Shot Prior");
+	draw_histogram_cv(img, shot_pred.cnn_raw,
+	                  margin + col_width + margin, y_shot, col_width, row_height,
+	                  cv::Scalar(0,255,255,255), "Shot CNN");
+	draw_histogram_cv(img, shot_pred.probabilities,
+	                  margin + 2*(col_width+margin), y_shot, col_width, row_height,
+	                  cv::Scalar(0,255,0,255), "Shot Posterior");
+
+	draw_zoomed_game_histogram_cv(img, game_pred.prior,
+	                              margin, y_game, col_width, row_height,
+	                              cv::Scalar(255,255,0,255), "Game Prior");
+	draw_zoomed_game_histogram_cv(img, game_pred.cnn_raw,
+	                              margin + col_width + margin, y_game, col_width, row_height,
+	                              cv::Scalar(0,255,255,255), "Game CNN");
+	draw_zoomed_game_histogram_cv(img, game_pred.probabilities,
+	                              margin + 2*(col_width+margin), y_game, col_width, row_height,
+	                              cv::Scalar(0,255,0,255), "Game Posterior");
+
+	// Flatten to BGRA bytes.
+	std::vector<uint8_t> bytes(IMG_W * IMG_H * 4);
+	for (int row = 0; row < IMG_H; row++)
+		memcpy(bytes.data() + row * IMG_W * 4, img.ptr(row), IMG_W * 4);
+
+	// Push to all active sources under a brief lock.
+	struct PushData {
+		std::vector<uint8_t> *bytes;
+		uint32_t w, h;
+	} push = { &bytes, (uint32_t)IMG_W, (uint32_t)IMG_H };
+
 	obs_enum_sources([](void *param, obs_source_t *source) -> bool {
 		const char *id = obs_source_get_id(source);
 		if (strcmp(id, "histogram_viz_source") == 0) {
-			struct histogram_viz_source *context = 
-				(struct histogram_viz_source *)obs_obj_get_data(source);
-			
-			if (context) {
-				std::lock_guard<std::mutex> lock(context->data_mutex);
-				
-				PredPair *pair = (PredPair *)param;
-				
-				// Update shot clock data
-				context->shot_prior = pair->shot->prior;
-				context->shot_cnn = pair->shot->cnn_raw;
-				context->shot_posterior = pair->shot->probabilities;
-				context->shot_value = pair->shot->value;
-				context->shot_confidence = pair->shot->confidence;
-				
-				// Update game clock data
-				context->game_prior = pair->game->prior;
-				context->game_cnn = pair->game->cnn_raw;
-				context->game_posterior = pair->game->probabilities;
-				context->game_value = pair->game->value;
-				context->game_confidence = pair->game->confidence;
-				
-				context->data_updated = true;
-				context->needs_update = true; // Trigger texture regeneration
+			auto *ctx  = (struct histogram_viz_source *)obs_obj_get_data(source);
+			auto *push = (struct PushData *)param;
+			if (ctx && push) {
+				std::lock_guard<std::mutex> lock(ctx->data_mutex);
+				ctx->pending_bytes = *push->bytes;
+				ctx->pending_w     = push->w;
+				ctx->pending_h     = push->h;
+				ctx->needs_update  = true;
 			}
 		}
 		return true;
-	}, (void*)&pair);
+	}, &push);
 }
 #endif
-
-struct obs_source_info histogram_viz_source_info = {};
-
-void init_histogram_viz_source_info()
-{
-	histogram_viz_source_info.id = "histogram_viz_source";
-	histogram_viz_source_info.type = OBS_SOURCE_TYPE_INPUT;
-	histogram_viz_source_info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
-	histogram_viz_source_info.get_name = histogram_viz_source_get_name;
-	histogram_viz_source_info.create = histogram_viz_source_create;
-	histogram_viz_source_info.destroy = histogram_viz_source_destroy;
-	histogram_viz_source_info.update = histogram_viz_source_update;
-	histogram_viz_source_info.get_properties = histogram_viz_source_properties;
-	histogram_viz_source_info.get_defaults = histogram_viz_source_defaults;
-	histogram_viz_source_info.video_render = histogram_viz_source_render;
-	histogram_viz_source_info.get_width = histogram_viz_source_get_width;
-	histogram_viz_source_info.get_height = histogram_viz_source_get_height;
-}

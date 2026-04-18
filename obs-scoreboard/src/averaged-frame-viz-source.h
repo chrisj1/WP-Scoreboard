@@ -3,6 +3,10 @@
 #include <obs-module.h>
 
 #ifdef USE_CNN_OCR
+#ifdef __APPLE__
+#undef NO
+#undef YES
+#endif
 #include <opencv2/opencv.hpp>
 
 // Public API to update averaged frame data from control panel

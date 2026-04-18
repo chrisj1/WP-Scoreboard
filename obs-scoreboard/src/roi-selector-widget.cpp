@@ -6,6 +6,8 @@
 #include <QGroupBox>
 #include <QMessageBox>
 #include <QElapsedTimer>
+#include <QGuiApplication>
+#include <QScreen>
 
 // ============================================================================
 // ROICanvas Implementation
@@ -17,7 +19,7 @@ ROICanvas::ROICanvas(QWidget* parent)
     , selection_mode("shot")
     , scale_factor(1.0)
 {
-    setMinimumSize(800, 600);
+    setMinimumSize(640, 360);
     setScaledContents(false);
     setAlignment(Qt::AlignCenter);
     setStyleSheet("QLabel { background-color: #2a2a2a; border: 2px solid #555; }");
@@ -245,10 +247,16 @@ ROISelectorDialog::ROISelectorDialog(QWidget* parent)
     , frame_count(0)
 {
     setWindowTitle("Clock ROI Selector");
-    setMinimumSize(1000, 800);
+    setMinimumSize(800, 600);
     
     setupUI();
-    
+
+    // Size dialog to fit available screen
+    if (QScreen* screen = QGuiApplication::primaryScreen()) {
+        QRect available = screen->availableGeometry();
+        resize(qMin(1000, available.width() - 60), qMin(800, available.height() - 60));
+    }
+
     // Start frame timer
     frame_timer = new QTimer(this);
     connect(frame_timer, &QTimer::timeout, this, &ROISelectorDialog::updateFrame);
@@ -287,7 +295,7 @@ void ROISelectorDialog::setupUI() {
     main_layout->addWidget(instructions);
     
     // Camera settings
-    QGroupBox* camera_group = new QGroupBox("Camera Source");
+    camera_group = new QGroupBox("Camera Source");
     QHBoxLayout* camera_layout = new QHBoxLayout(camera_group);
     
     camera_layout->addWidget(new QLabel("Source:"));
@@ -435,12 +443,24 @@ void ROISelectorDialog::closeCamera() {
     }
 }
 
+void ROISelectorDialog::setStaticFrame(const QImage& frame) {
+    canvas->setFrame(frame);
+}
+
+void ROISelectorDialog::hideCameraControls() {
+    camera_group->hide();
+    frame_timer->stop();
+}
+
 ROI ROISelectorDialog::getShotClockROI() const {
-    return current_shot_roi;
+    // Prefer explicitly saved ROI; fall back to whatever is drawn on the canvas
+    if (current_shot_roi.isValid()) return current_shot_roi;
+    return canvas->getShotClockROI();
 }
 
 ROI ROISelectorDialog::getGameClockROI() const {
-    return current_game_roi;
+    if (current_game_roi.isValid()) return current_game_roi;
+    return canvas->getGameClockROI();
 }
 
 void ROISelectorDialog::setShotClockROI(const ROI& roi) {
@@ -557,51 +577,48 @@ void ROISelectorDialog::onCameraSourceChanged() {
 }
 
 void ROISelectorDialog::onTestROIs() {
-    if (!camera.isOpened()) {
-        QMessageBox::warning(this, "No Camera", "Please open a camera first.");
-        return;
-    }
-    
-    if (!current_shot_roi.isValid() && !current_game_roi.isValid()) {
+    ROI shot_roi = getShotClockROI();
+    ROI game_roi = getGameClockROI();
+
+    if (!shot_roi.isValid() && !game_roi.isValid()) {
         QMessageBox::warning(this, "No ROIs", "Please select at least one ROI first.");
         return;
     }
-    
-    // Capture a frame and show ROIs
-    cv::Mat frame;
-    if (!camera.read(frame)) {
-        QMessageBox::warning(this, "Error", "Failed to capture frame.");
-        return;
-    }
-    
+
+    // Use the frame currently displayed on the canvas
+    QImage frame = canvas->getFrame();
+    int frame_w = frame.isNull() ? 0 : frame.width();
+    int frame_h = frame.isNull() ? 0 : frame.height();
+
     QString message = "ROI Test:\n\n";
-    
-    if (current_shot_roi.isValid()) {
-        cv::Rect rect = current_shot_roi.toRect();
-        if (rect.x >= 0 && rect.y >= 0 && 
-            rect.x + rect.width <= frame.cols && 
-            rect.y + rect.height <= frame.rows) {
-            message += QString("✅ Shot Clock ROI: (%1, %2, %3, %4) - Valid\n")
-                      .arg(rect.x).arg(rect.y).arg(rect.width).arg(rect.height);
-        } else {
-            message += "❌ Shot Clock ROI: Out of bounds!\n";
-        }
+
+    if (shot_roi.isValid()) {
+        bool in_bounds = frame.isNull() ||
+            (shot_roi.x >= 0 && shot_roi.y >= 0 &&
+             shot_roi.x + shot_roi.width  <= frame_w &&
+             shot_roi.y + shot_roi.height <= frame_h);
+        message += in_bounds
+            ? QString("Shot Clock ROI: (%1, %2) %3x%4 - Valid\n")
+                  .arg(shot_roi.x).arg(shot_roi.y).arg(shot_roi.width).arg(shot_roi.height)
+            : QString("Shot Clock ROI: (%1, %2) %3x%4 - Out of bounds!\n")
+                  .arg(shot_roi.x).arg(shot_roi.y).arg(shot_roi.width).arg(shot_roi.height);
     }
-    
-    if (current_game_roi.isValid()) {
-        cv::Rect rect = current_game_roi.toRect();
-        if (rect.x >= 0 && rect.y >= 0 && 
-            rect.x + rect.width <= frame.cols && 
-            rect.y + rect.height <= frame.rows) {
-            message += QString("✅ Game Clock ROI: (%1, %2, %3, %4) - Valid\n")
-                      .arg(rect.x).arg(rect.y).arg(rect.width).arg(rect.height);
-        } else {
-            message += "❌ Game Clock ROI: Out of bounds!\n";
-        }
+
+    if (game_roi.isValid()) {
+        bool in_bounds = frame.isNull() ||
+            (game_roi.x >= 0 && game_roi.y >= 0 &&
+             game_roi.x + game_roi.width  <= frame_w &&
+             game_roi.y + game_roi.height <= frame_h);
+        message += in_bounds
+            ? QString("Game Clock ROI: (%1, %2) %3x%4 - Valid\n")
+                  .arg(game_roi.x).arg(game_roi.y).arg(game_roi.width).arg(game_roi.height)
+            : QString("Game Clock ROI: (%1, %2) %3x%4 - Out of bounds!\n")
+                  .arg(game_roi.x).arg(game_roi.y).arg(game_roi.width).arg(game_roi.height);
     }
-    
-    message += QString("\nFrame size: %1 x %2").arg(frame.cols).arg(frame.rows);
-    
+
+    if (frame_w > 0)
+        message += QString("\nFrame size: %1 x %2").arg(frame_w).arg(frame_h);
+
     QMessageBox::information(this, "ROI Test Results", message);
 }
 
@@ -632,3 +649,5 @@ void ROISelectorDialog::updateStatus() {
 }
 
 #endif // USE_CNN_OCR
+
+#include "roi-selector-widget.moc"

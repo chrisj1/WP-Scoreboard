@@ -32,6 +32,15 @@ using namespace Gdiplus;
 
 #include <QtCore/QSettings>
 
+#ifndef _WIN32
+#include <QImage>
+#include <QPainter>
+#include <QPainterPath>
+#include <QLinearGradient>
+#include <QFont>
+#include <QtSvg/QSvgRenderer>
+#endif
+
 // Get saved config directory from control panel settings
 std::string get_saved_config_dir() {
 	QSettings settings("WaterPoloScoreboard", "ControlPanel");
@@ -330,7 +339,21 @@ struct schedule_source_context {
 	
 	// Config
 	std::string config_dir;
-	
+
+	// OBS texture (built from QImage / GDI+ bitmap)
+	gs_texture_t *texture = nullptr;
+	bool needs_update = true;
+	int  last_day_index = -1; // detect rotation changes
+
+	// Scroll
+	uint32_t max_height  = 600;  // cap; content scrolls if taller
+	float    scroll_y    = 0.0f; // current scroll position in pixels
+	float    scroll_speed = 40.0f; // px per second
+	float    scroll_pause = 2.0f;  // seconds to pause at top/bottom
+	float    scroll_pause_timer = 2.0f;
+	bool     scroll_dir_down = true;
+	uint32_t content_height = 0; // actual rendered content height
+
 #ifdef _WIN32
 	// GDI+ resources
 	Graphics *graphics;
@@ -338,7 +361,7 @@ struct schedule_source_context {
 	std::map<std::string, Image*> team_logos;
 #endif
 	
-	schedule_source_context() : source(nullptr), width(1280), height(1080),
+	schedule_source_context() : source(nullptr), width(900), height(600),
 		rotation_seconds(5), current_day_index(0),
 		background_color(0x001A1A1A), text_color(0xFFFFFFFF), accent_color(0xFF0080FF),
 		font_size(36)
@@ -957,6 +980,196 @@ void render_day_schedule(schedule_source_context *context, const std::string& da
 }
 #endif
 
+#ifndef _WIN32
+// ── macOS/Linux Qt rendering ──────────────────────────────────────────────────
+
+static QColor team_color(const std::string &team_name, bool as_home)
+{
+	if (g_schedule_data) {
+		auto it = g_schedule_data->teams.find(team_name);
+		if (it != g_schedule_data->teams.end()) {
+			uint32_t c = as_home ? it->second.home_bg : it->second.away_bg;
+			return QColor((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF, 200);
+		}
+	}
+	return as_home ? QColor(40, 80, 160, 180) : QColor(160, 40, 40, 180);
+}
+
+static QString friendly_date(const std::string &date_str)
+{
+	std::tm tm = {};
+	std::istringstream ss(date_str);
+	ss >> std::get_time(&tm, "%Y-%m-%d");
+	if (ss.fail()) return QString::fromStdString(date_str);
+	std::mktime(&tm);
+	char buf[64];
+	std::strftime(buf, sizeof(buf), "%A, %B %d", &tm);
+	return QString(buf);
+}
+
+static void draw_logo_qt(QPainter &painter, const std::string &logo_path,
+                         const std::string &config_dir, QRect rect)
+{
+	if (logo_path.empty()) return;
+	std::string full = config_dir + "/" + logo_path;
+	QString qp = QString::fromStdString(full);
+	if (qp.endsWith(".svg", Qt::CaseInsensitive)) {
+		QSvgRenderer r(qp);
+		if (r.isValid()) { r.render(&painter, rect); return; }
+	}
+	QImage img(qp);
+	if (!img.isNull()) {
+		QImage scaled = img.scaled(rect.width(), rect.height(),
+		                           Qt::KeepAspectRatio, Qt::SmoothTransformation);
+		int ox = rect.x() + (rect.width()  - scaled.width())  / 2;
+		int oy = rect.y() + (rect.height() - scaled.height()) / 2;
+		painter.drawImage(QRect(ox, oy, scaled.width(), scaled.height()), scaled);
+	}
+}
+
+static void render_schedule_qt(schedule_source_context *context, const std::string &date_str)
+{
+	int W = (int)context->width;
+
+	const int mg   = 12;
+	const int hdrH = 58;
+	const int rowH = 96;
+	const int gap  = 7;
+	const int logoSz = 60;
+
+	auto games = get_games_for_day(date_str);
+	int gameCount = (int)games.size();
+
+	// Compute full content height
+	int fullH = mg + hdrH + gap
+	          + std::max(1, gameCount) * (rowH + gap)
+	          + mg;
+	context->content_height = (uint32_t)fullH;
+
+	// Viewport height is capped; texture matches the viewport (not full content)
+	int vpH = (int)std::min((uint32_t)fullH, context->max_height);
+	context->height = (uint32_t)vpH;
+
+	// Reset scroll when content fits
+	if ((uint32_t)fullH <= context->max_height) {
+		context->scroll_y = 0.0f;
+		context->scroll_dir_down = true;
+		context->scroll_pause_timer = context->scroll_pause;
+	}
+
+	// QImage is viewport-sized; painter translate scrolls the content
+	QImage image(W, vpH, QImage::Format_ARGB32);
+	image.fill(Qt::transparent);
+	QPainter p(&image);
+	p.setRenderHint(QPainter::Antialiasing);
+	p.setRenderHint(QPainter::TextAntialiasing);
+
+	// Scroll: translate painter up so the correct window is visible
+	p.translate(0, -(int)context->scroll_y);
+	// Clip to the full content so items outside the viewport are hidden
+	p.setClipRect(0, (int)context->scroll_y, W, vpH);
+
+	// Background panel — fill the full content height
+	QPainterPath bgPath;
+	bgPath.addRoundedRect(0, 0, W, fullH, 8, 8);
+	p.fillPath(bgPath, QColor(18, 18, 24, 248));
+
+	// Header
+	{
+		QPainterPath hp;
+		hp.addRoundedRect(mg, mg, W - 2*mg, hdrH, 6, 6);
+		QLinearGradient hg(mg, mg, mg, mg + hdrH);
+		hg.setColorAt(0, QColor(40, 40, 56, 255));
+		hg.setColorAt(1, QColor(26, 26, 36, 255));
+		p.fillPath(hp, hg);
+		p.setPen(Qt::white);
+		p.setFont(QFont("Arial", 22, QFont::Bold));
+		p.drawText(QRect(mg, mg, W - 2*mg, hdrH), Qt::AlignCenter,
+		           friendly_date(date_str));
+	}
+
+	if (games.empty()) {
+		p.setPen(QColor(160, 160, 180));
+		p.setFont(QFont("Arial", 18));
+		p.drawText(QRect(mg, mg + hdrH + gap, W - 2*mg, rowH),
+		           Qt::AlignCenter, "No games scheduled");
+	} else {
+		int y = mg + hdrH + gap;
+		for (const auto &game : games) {
+			if (y + rowH > fullH - mg) break;
+
+			QColor homeC = team_color(game.home_team, true);
+			QColor awayC = team_color(game.away_team, false);
+			QRect rowRect(mg, y, W - 2*mg, rowH);
+
+			// Row gradient: home left → dark center → away right
+			QPainterPath rowPath;
+			rowPath.addRoundedRect(rowRect, 8, 8);
+			QLinearGradient rg(rowRect.left(), 0, rowRect.right(), 0);
+			rg.setColorAt(0.00, homeC);
+			rg.setColorAt(0.38, QColor(26, 26, 36, 230));
+			rg.setColorAt(0.62, QColor(26, 26, 36, 230));
+			rg.setColorAt(1.00, awayC);
+			p.fillPath(rowPath, rg);
+			p.setPen(QPen(QColor(255, 255, 255, 28), 1));
+			p.drawPath(rowPath);
+
+			// Center column: time + VS
+			int cW = 110;
+			int cX = rowRect.left() + (rowRect.width() - cW) / 2;
+			int sideW = cX - rowRect.left() - 8;
+
+			p.setPen(QColor(200, 200, 212));
+			p.setFont(QFont("Arial", 14));
+			p.drawText(QRect(cX, y, cW, rowH / 2), Qt::AlignCenter,
+			           QString::fromStdString(game.time));
+			p.setPen(QColor(230, 230, 240));
+			p.setFont(QFont("Arial", 17, QFont::Bold));
+			p.drawText(QRect(cX, y + rowH / 2, cW, rowH / 2),
+			           Qt::AlignCenter, "VS");
+
+			// Home side (logo + name)
+			int lx = rowRect.left() + 8;
+			draw_logo_qt(p, g_schedule_data && g_schedule_data->teams.count(game.home_team)
+			               ? g_schedule_data->teams.at(game.home_team).logo_path : "",
+			             context->config_dir,
+			             QRect(lx, y + (rowH - logoSz) / 2, logoSz, logoSz));
+			p.setPen(Qt::white);
+			p.setFont(QFont("Arial", 19, QFont::Bold));
+			p.drawText(QRect(lx + logoSz + 6, y, sideW - logoSz - 6, rowH),
+			           Qt::AlignLeft | Qt::AlignVCenter,
+			           QString::fromStdString(game.home_team));
+
+			// Away side (name + logo)
+			int rx = cX + cW + 8;
+			int awayNameW = sideW - logoSz - 6;
+			p.setPen(Qt::white);
+			p.setFont(QFont("Arial", 19, QFont::Bold));
+			p.drawText(QRect(rx, y, awayNameW, rowH),
+			           Qt::AlignRight | Qt::AlignVCenter,
+			           QString::fromStdString(game.away_team));
+			int awayLogoX = rx + awayNameW + 6;
+			draw_logo_qt(p, g_schedule_data && g_schedule_data->teams.count(game.away_team)
+			               ? g_schedule_data->teams.at(game.away_team).logo_path : "",
+			             context->config_dir,
+			             QRect(awayLogoX, y + (rowH - logoSz) / 2, logoSz, logoSz));
+
+			y += rowH + gap;
+		}
+	}
+
+	p.end();
+
+	// Upload viewport-sized texture
+	if (context->texture) {
+		gs_texture_destroy(context->texture);
+		context->texture = nullptr;
+	}
+	const uint8_t *bits = image.constBits();
+	context->texture = gs_texture_create(W, vpH, GS_BGRA, 1, &bits, 0);
+}
+#endif // !_WIN32
+
 // OBS Source callbacks implementation
 static const char *schedule_source_get_name(void *unused)
 {
@@ -986,7 +1199,14 @@ static void *schedule_source_create(obs_data_t *settings, obs_source_t *source)
 }static void schedule_source_destroy(void *data)
 {
 	auto *context = static_cast<schedule_source_context*>(data);
-	
+
+	if (context->texture) {
+		obs_enter_graphics();
+		gs_texture_destroy(context->texture);
+		obs_leave_graphics();
+		context->texture = nullptr;
+	}
+
 #ifdef _WIN32
 	// Clean up logos
 	for (auto& pair : context->team_logos) {
@@ -1105,6 +1325,17 @@ static void schedule_source_update(void *data, obs_data_t *settings)
 		}
 	}
 	
+	int new_width = (int)obs_data_get_int(settings, "source_width");
+	if (new_width > 0 && (uint32_t)new_width != context->width) {
+		context->width = (uint32_t)new_width;
+		context->needs_update = true;
+	}
+	int new_max_h = (int)obs_data_get_int(settings, "max_height");
+	if (new_max_h > 0) {
+		context->max_height = (uint32_t)new_max_h;
+		context->needs_update = true;
+	}
+
 	context->rotation_seconds = (int)obs_data_get_int(settings, "rotation_seconds");
 	
 	// Visual settings
@@ -1115,8 +1346,9 @@ static void schedule_source_update(void *data, obs_data_t *settings)
 	
 	// Update active days
 	update_active_days(context);
-	
-	blog(LOG_INFO, "[Schedule] Settings updated - Active dates: %zu, Rotation: %ds", 
+	context->needs_update = true;
+
+	blog(LOG_INFO, "[Schedule] Settings updated - Active dates: %zu, Rotation: %ds",
 		 context->active_days.size(), context->rotation_seconds);
 }
 
@@ -1126,6 +1358,9 @@ static obs_properties_t *schedule_source_get_properties(void *data)
 	
 	obs_properties_t *props = obs_properties_create();
 	
+	obs_properties_add_int_slider(props, "source_width",  "Width (px)",      400, 1920, 10);
+	obs_properties_add_int_slider(props, "max_height",    "Max Height (px)", 200, 1080, 10);
+
 	// Add config directory path setting
 	obs_properties_add_path(props, "config_directory", "Config Directory (teams.csv, schedule.csv, logos)",
 		OBS_PATH_DIRECTORY, nullptr, nullptr);
@@ -1190,6 +1425,9 @@ static void schedule_source_get_defaults(obs_data_t *settings)
 		obs_data_set_default_bool(settings, prop_name.c_str(), true);
 	}
 	
+	obs_data_set_default_int(settings, "source_width", 900);
+	obs_data_set_default_int(settings, "max_height",   600);
+
 	// Default rotation
 	obs_data_set_default_int(settings, "rotation_seconds", 5);
 	
@@ -1203,71 +1441,107 @@ static void schedule_source_get_defaults(obs_data_t *settings)
 static void schedule_source_render(void *data, gs_effect_t *effect)
 {
 	auto *context = static_cast<schedule_source_context*>(data);
-	
-	// Check if global schedule data has been updated and reload if needed
+
+	// If no dates are selected, fall back to showing all dates from global data
+	if (context->active_days.empty() && g_schedule_data) {
+		auto all_dates = get_schedule_dates();
+		if (!all_dates.empty())
+			context->active_days = all_dates;
+	}
+
+	if (context->active_days.empty())
+		return;
+
+	// Detect external schedule update
 	if (g_schedule_data && g_schedule_data->last_update > context->last_schedule_update) {
-		blog(LOG_INFO, "[Schedule] Detected schedule update, reloading...");
 		context->last_schedule_update = g_schedule_data->last_update;
-		
-		// Clear the render target to force regeneration
-#ifdef _WIN32
-		if (context->render_target) {
-			delete context->render_target;
-			context->render_target = nullptr;
-		}
-		if (context->graphics) {
-			delete context->graphics;
-			context->graphics = nullptr;
-		}
-		
-		// Recreate graphics resources
-		context->render_target = new Bitmap(context->width, context->height, PixelFormat32bppARGB);
-		context->graphics = new Graphics(context->render_target);
-		context->graphics->SetSmoothingMode(SmoothingModeAntiAlias);
-		context->graphics->SetTextRenderingHint(TextRenderingHintAntiAlias);
-#endif
+		context->needs_update = true;
+		// Sync config_dir from global data
+		if (!g_schedule_data->config_dir.empty())
+			context->config_dir = g_schedule_data->config_dir;
 	}
-	
-	if (context->active_days.empty()) {
-		return; // No days to show
-	}
-	
+
 	// Handle rotation
 	auto now = std::chrono::steady_clock::now();
-	auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - context->last_rotation).count();
-	
+	auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+		now - context->last_rotation).count();
+
 	if (context->active_days.size() > 1 && elapsed >= context->rotation_seconds) {
-		context->current_day_index = (context->current_day_index + 1) % context->active_days.size();
+		context->current_day_index =
+			(context->current_day_index + 1) % context->active_days.size();
 		context->last_rotation = now;
 	}
-	
-	// Get current day to display
+
+	// Detect day index change → need redraw
+	if (context->last_day_index != context->current_day_index) {
+		context->last_day_index = context->current_day_index;
+		context->needs_update = true;
+	}
+
+	if (context->current_day_index >= (int)context->active_days.size())
+		context->current_day_index = 0;
+
 	std::string current_day = context->active_days[context->current_day_index];
-	
+
+	if (context->needs_update) {
+		context->needs_update = false;
+
 #ifdef _WIN32
-	// Render the schedule
-	render_day_schedule(context, current_day);
-	
-	// Convert to OBS texture
-	if (context->render_target) {
-		BitmapData bitmapData;
-		Rect rect(0, 0, context->width, context->height);
-		
-		if (context->render_target->LockBits(&rect, ImageLockModeRead, PixelFormat32bppARGB, &bitmapData) == Ok) {
-			// Create texture
-			gs_texture_t *texture = gs_texture_create(context->width, context->height, GS_BGRA, 1, 
-				(const uint8_t**)&bitmapData.Scan0, GS_DYNAMIC);
-			
-			if (texture) {
-				gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), texture);
-				gs_draw_sprite(texture, 0, context->width, context->height);
-				gs_texture_destroy(texture);
+		render_day_schedule(context, current_day);
+		if (context->render_target) {
+			BitmapData bitmapData;
+			Rect rect(0, 0, context->width, context->height);
+			if (context->render_target->LockBits(&rect, ImageLockModeRead,
+			    PixelFormat32bppARGB, &bitmapData) == Ok) {
+				if (context->texture) {
+					gs_texture_destroy(context->texture);
+					context->texture = nullptr;
+				}
+				context->texture = gs_texture_create(
+					context->width, context->height, GS_BGRA, 1,
+					(const uint8_t **)&bitmapData.Scan0, 0);
+				context->render_target->UnlockBits(&bitmapData);
 			}
-			
-			context->render_target->UnlockBits(&bitmapData);
+		}
+#else
+		render_schedule_qt(context, current_day);
+#endif
+	}
+
+	if (context->texture)
+		obs_source_draw(context->texture, 0, 0, context->width, context->height, false);
+
+	UNUSED_PARAMETER(effect);
+}
+
+static void schedule_source_tick(void *data, float seconds)
+{
+	auto *ctx = static_cast<schedule_source_context *>(data);
+	if (ctx->content_height <= ctx->max_height) return; // nothing to scroll
+
+	float maxScroll = (float)((int)ctx->content_height - (int)ctx->max_height);
+
+	if (ctx->scroll_pause_timer > 0.0f) {
+		ctx->scroll_pause_timer -= seconds;
+		return;
+	}
+
+	if (ctx->scroll_dir_down) {
+		ctx->scroll_y += ctx->scroll_speed * seconds;
+		if (ctx->scroll_y >= maxScroll) {
+			ctx->scroll_y = maxScroll;
+			ctx->scroll_dir_down = false;
+			ctx->scroll_pause_timer = ctx->scroll_pause;
+		}
+	} else {
+		ctx->scroll_y -= ctx->scroll_speed * seconds;
+		if (ctx->scroll_y <= 0.0f) {
+			ctx->scroll_y = 0.0f;
+			ctx->scroll_dir_down = true;
+			ctx->scroll_pause_timer = ctx->scroll_pause;
 		}
 	}
-#endif
+	ctx->needs_update = true; // redraw with new scroll position
 }
 
 static uint32_t schedule_source_get_width(void *data)
@@ -1296,6 +1570,7 @@ void register_schedule_source()
 	info.get_properties = schedule_source_get_properties;
 	info.get_defaults = schedule_source_get_defaults;
 	info.video_render = schedule_source_render;
+	info.video_tick   = schedule_source_tick;
 	info.get_width = schedule_source_get_width;
 	info.get_height = schedule_source_get_height;
 	

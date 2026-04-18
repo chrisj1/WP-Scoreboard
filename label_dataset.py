@@ -3,18 +3,38 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 import os
+import sys
 import json
 import random
+import shutil
 import pytesseract
 import numpy as np
 
-# Set up Tesseract
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Set up Tesseract - platform-aware path detection
+if sys.platform == 'win32':
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    standard_tessdata = r'C:\Program Files\Tesseract-OCR\tessdata'
+    path_separator = ';'
+else:
+    # macOS / Linux: find tesseract via PATH or common Homebrew locations
+    tesseract_cmd = shutil.which('tesseract')
+    if tesseract_cmd is None:
+        # Fallback to common Homebrew install paths
+        for candidate in ['/opt/homebrew/bin/tesseract', '/usr/local/bin/tesseract']:
+            if os.path.isfile(candidate):
+                tesseract_cmd = candidate
+                break
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    if sys.platform == 'darwin':
+        standard_tessdata = '/opt/homebrew/share/tessdata'
+    else:
+        standard_tessdata = '/usr/share/tessdata'
+    path_separator = ':'
 
 # Set TESSDATA_PREFIX for custom models
-standard_tessdata = r'C:\Program Files\Tesseract-OCR\tessdata'
 custom_tessdata = os.path.abspath('./tessdata_ssd')
-tessdata_path = f"{custom_tessdata};{standard_tessdata}"
+tessdata_path = f"{custom_tessdata}{path_separator}{standard_tessdata}"
 os.environ['TESSDATA_PREFIX'] = tessdata_path
 
 class DatasetLabeler:

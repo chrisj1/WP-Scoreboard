@@ -2,6 +2,10 @@
 
 #include <torch/torch.h>
 #include <torch/script.h>
+#ifdef __APPLE__
+#undef NO
+#undef YES
+#endif
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <vector>

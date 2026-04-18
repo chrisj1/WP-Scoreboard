@@ -22,8 +22,31 @@ __pycache__/
 
 # Build artifacts
 build/
+build-mac/
+obs-scoreboard/build-mac/
 *.exp
 *.def
 
 # VS Code
 .vscode/
+
+# macOS metadata
+.DS_Store
+
+# Local deployment / Docker scripts
+deploy/
+
+# Training artifacts (images, debug outputs)
+*_debug.png
+*_curves.png
+training_history.png
+
+# Plugin log output
+plugin.log
+vsd-scoreboard-plugin/plugin.log
+
+# StreamDock scene profiles (machine-specific)
+*.SDProfile
+
+# Virtual environments
+venv/

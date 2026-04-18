@@ -1,0 +1,319 @@
+{
+  "Name": "WP Scoreboard",
+  "Version": "1.0",
+  "Author": "WP Scoreboard",
+  "Description": "Live water polo scoreboard control for OBS via WebSocket.",
+  "URL": "",
+  "SDKVersion": 1,
+  "Software": { "MinimumVersion": "2.9" },
+  "OS": [
+    { "Platform": "mac",     "MinimumVersion": "10.11" },
+    { "Platform": "windows", "MinimumVersion": "7" }
+  ],
+  "Icon": "images/plugin-icon.png",
+  "Category": "WP Scoreboard",
+  "CategoryIcon": "images/plugin-icon.png",
+  "CodePath": "main",
+  "Actions": [
+    {
+      "Name": "Score: Home +1",
+      "UUID": "com.wps.scoreboard.homescoreup",
+      "Icon": "images/actions/homescoreup.png",
+      "Tooltip": "Add a goal to the home team",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/homescoreup.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Score: Home -1",
+      "UUID": "com.wps.scoreboard.homescoredown",
+      "Icon": "images/actions/homescoredown.png",
+      "Tooltip": "Remove a goal from the home team",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/homescoredown.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Score: Away +1",
+      "UUID": "com.wps.scoreboard.awayscoreup",
+      "Icon": "images/actions/awayscoreup.png",
+      "Tooltip": "Add a goal to the away team",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/awayscoreup.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Score: Away -1",
+      "UUID": "com.wps.scoreboard.awayscoredown",
+      "Icon": "images/actions/awayscoredown.png",
+      "Tooltip": "Remove a goal from the away team",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/awayscoredown.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Period: Next",
+      "UUID": "com.wps.scoreboard.nextperiod",
+      "Icon": "images/actions/nextperiod.png",
+      "Tooltip": "Advance to the next period",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/nextperiod.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Period: Prev",
+      "UUID": "com.wps.scoreboard.prevperiod",
+      "Icon": "images/actions/prevperiod.png",
+      "Tooltip": "Go back to the previous period",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/prevperiod.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Period: Set Final",
+      "UUID": "com.wps.scoreboard.setfinal",
+      "Icon": "images/actions/setfinal.png",
+      "Tooltip": "Mark the game as Final",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/setfinal.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Period: Set Shootout",
+      "UUID": "com.wps.scoreboard.setshootout",
+      "Icon": "images/actions/setshootout.png",
+      "Tooltip": "Mark the game as Shootout",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/setshootout.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Shot Clock: Reset (30)",
+      "UUID": "com.wps.scoreboard.resetshotclock",
+      "Icon": "images/actions/resetshotclock.png",
+      "Tooltip": "Reset shot clock to 30 seconds",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/resetshotclock.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Shot Clock: Set 35",
+      "UUID": "com.wps.scoreboard.shotclock35",
+      "Icon": "images/actions/shotclock35.png",
+      "Tooltip": "Set shot clock to 35 seconds",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/shotclock35.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Exclusion: Home +1",
+      "UUID": "com.wps.scoreboard.homexclusionadd",
+      "Icon": "images/actions/homexclusionadd.png",
+      "Tooltip": "Add an exclusion to the home team",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/homexclusionadd.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Exclusion: Home Clear",
+      "UUID": "com.wps.scoreboard.homexclusionclr",
+      "Icon": "images/actions/homexclusionclr.png",
+      "Tooltip": "Clear home team exclusions",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/homexclusionclr.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Exclusion: Away +1",
+      "UUID": "com.wps.scoreboard.awayxclusionadd",
+      "Icon": "images/actions/awayxclusionadd.png",
+      "Tooltip": "Add an exclusion to the away team",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/awayxclusionadd.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Exclusion: Away Clear",
+      "UUID": "com.wps.scoreboard.awayxclusionclr",
+      "Icon": "images/actions/awayxclusionclr.png",
+      "Tooltip": "Clear away team exclusions",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/awayxclusionclr.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Timeout: Home Use",
+      "UUID": "com.wps.scoreboard.hometimeout",
+      "Icon": "images/actions/hometimeout.png",
+      "Tooltip": "Use a home team timeout",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/hometimeout.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Timeout: Home Restore",
+      "UUID": "com.wps.scoreboard.homerestoretimeout",
+      "Icon": "images/actions/homerestoretimeout.png",
+      "Tooltip": "Restore a home team timeout",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/homerestoretimeout.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Timeout: Away Use",
+      "UUID": "com.wps.scoreboard.awaytimeout",
+      "Icon": "images/actions/awaytimeout.png",
+      "Tooltip": "Use an away team timeout",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/awaytimeout.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Timeout: Away Restore",
+      "UUID": "com.wps.scoreboard.awayrestoretimeout",
+      "Icon": "images/actions/awayrestoretimeout.png",
+      "Tooltip": "Restore an away team timeout",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/awayrestoretimeout.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Man-Up: Home",
+      "UUID": "com.wps.scoreboard.homemanup",
+      "Icon": "images/actions/homemanup.png",
+      "Tooltip": "Toggle home team man-up advantage",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/homemanup.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Man-Up: Away",
+      "UUID": "com.wps.scoreboard.awaymanup",
+      "Icon": "images/actions/awaymanup.png",
+      "Tooltip": "Toggle away team man-up advantage",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/awaymanup.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Info: Score",
+      "UUID": "com.wps.scoreboard.scoreinfo",
+      "Icon": "images/actions/scoreinfo.png",
+      "Tooltip": "Live score display",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/scoreinfo.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Info: Period & Clock",
+      "UUID": "com.wps.scoreboard.periodclockinfo",
+      "Icon": "images/actions/periodclockinfo.png",
+      "Tooltip": "Live period and game clock display",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/periodclockinfo.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Info: Shot Clock",
+      "UUID": "com.wps.scoreboard.shotclockinfo",
+      "Icon": "images/actions/shotclockinfo.png",
+      "Tooltip": "Live shot clock display",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/shotclockinfo.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Info: Team Names",
+      "UUID": "com.wps.scoreboard.teamnameinfo",
+      "Icon": "images/actions/teamnameinfo.png",
+      "Tooltip": "Team names and records",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/teamnameinfo.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Info: Exclusions",
+      "UUID": "com.wps.scoreboard.exclusioninfo",
+      "Icon": "images/actions/exclusioninfo.png",
+      "Tooltip": "Current exclusion counts",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/exclusioninfo.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Info: Timeouts",
+      "UUID": "com.wps.scoreboard.timeoutinfo",
+      "Icon": "images/actions/timeoutinfo.png",
+      "Tooltip": "Remaining timeouts",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/timeoutinfo.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Game: Reset",
+      "UUID": "com.wps.scoreboard.resetgame",
+      "Icon": "images/actions/resetgame.png",
+      "Tooltip": "Reset the entire game to defaults",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/resetgame.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Game: Next",
+      "UUID": "com.wps.scoreboard.nextgame",
+      "Icon": "images/actions/resetgame.png",
+      "Tooltip": "Advance to the next game in the schedule",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/resetgame.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Game: Previous",
+      "UUID": "com.wps.scoreboard.prevgame",
+      "Icon": "images/actions/resetgame.png",
+      "Tooltip": "Go back to the previous game in the schedule",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/resetgame.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    },
+    {
+      "Name": "Instant Replay",
+      "UUID": "com.wps.scoreboard.triggerreplay",
+      "Icon": "images/actions/triggerreplay.png",
+      "Tooltip": "Save a replay snapshot now — switch to replay scene to play it",
+      "Controllers": ["Keypad"],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/actions/triggerreplay.png", "TitleAlignment": "bottom", "FontSize": "11" }]
+    }
+  ]
+}
