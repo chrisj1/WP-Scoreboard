@@ -2141,22 +2141,22 @@ private slots:
 			return;
 		}
 
-		// Use saved source if it's still available; otherwise ask
+		// Always prompt so the user can confirm or change the source
 		QSettings roiSettings2("WaterPoloScoreboard", "CNNModels");
 		QString savedSource = roiSettings2.value("shotClockROI_source", "").toString();
-		QString selectedSource;
-		if (!savedSource.isEmpty() && videoSourceMap.contains(savedSource)) {
-			selectedSource = savedSource;
-		} else {
-			bool ok;
-			selectedSource = QInputDialog::getItem(this,
-				"Select Video Source",
-				"Choose a video source to capture frame from:",
-				videoSourceNames, 0, false, &ok);
-			if (!ok || selectedSource.isEmpty()) {
-				for (obs_source_t* src : videoSourceMap.values()) obs_source_release(src);
-				return;
-			}
+		int defaultIndex = 0;
+		if (!savedSource.isEmpty()) {
+			int idx = videoSourceNames.indexOf(savedSource);
+			if (idx >= 0) defaultIndex = idx;
+		}
+		bool ok;
+		QString selectedSource = QInputDialog::getItem(this,
+			"Select Video Source",
+			"Choose a video source to capture frame from:",
+			videoSourceNames, defaultIndex, false, &ok);
+		if (!ok || selectedSource.isEmpty()) {
+			for (obs_source_t* src : videoSourceMap.values()) obs_source_release(src);
+			return;
 		}
 
 		obs_source_t* source = videoSourceMap[selectedSource];
@@ -2272,24 +2272,23 @@ private slots:
 			return;
 		}
 
-		// Use saved source if it's still available; otherwise ask
+		// Always prompt so the user can confirm or change the source
 		QSettings roiSettings2("WaterPoloScoreboard", "CNNModels");
 		QString savedSource = roiSettings2.value("gameClockROI_source", "").toString();
-		// Also accept the shot clock source as a sensible default
 		if (savedSource.isEmpty()) savedSource = roiSettings2.value("shotClockROI_source", "").toString();
-		QString selectedSource;
-		if (!savedSource.isEmpty() && videoSourceMap.contains(savedSource)) {
-			selectedSource = savedSource;
-		} else {
-			bool ok;
-			selectedSource = QInputDialog::getItem(this,
-				"Select Video Source",
-				"Choose a video source to capture frame from:",
-				videoSourceNames, 0, false, &ok);
-			if (!ok || selectedSource.isEmpty()) {
-				for (obs_source_t* src : videoSourceMap.values()) obs_source_release(src);
-				return;
-			}
+		int defaultIndex = 0;
+		if (!savedSource.isEmpty()) {
+			int idx = videoSourceNames.indexOf(savedSource);
+			if (idx >= 0) defaultIndex = idx;
+		}
+		bool ok;
+		QString selectedSource = QInputDialog::getItem(this,
+			"Select Video Source",
+			"Choose a video source to capture frame from:",
+			videoSourceNames, defaultIndex, false, &ok);
+		if (!ok || selectedSource.isEmpty()) {
+			for (obs_source_t* src : videoSourceMap.values()) obs_source_release(src);
+			return;
 		}
 
 		obs_source_t* source = videoSourceMap[selectedSource];
