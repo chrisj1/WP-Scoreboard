@@ -1166,8 +1166,13 @@ void register_scoreboard_source()
 	info.get_height = scoreboard_source_get_height;
 	
 	obs_register_source(&info);
-	
 	blog(LOG_INFO, "[Scoreboard] Registered source: water_polo_scoreboard");
+
+	// Register legacy alias so existing scenes with the old simple source don't error
+	struct obs_source_info simple_info = info;
+	simple_info.id = "water_polo_scoreboard_simple";
+	obs_register_source(&simple_info);
+	blog(LOG_INFO, "[Scoreboard] Registered legacy alias: water_polo_scoreboard_simple");
 	
 #ifdef USE_CNN_OCR
 	// Register histogram visualization source
